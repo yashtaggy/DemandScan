@@ -19,7 +19,7 @@ interface RouteContext {
   params: Promise<{ symbol: string }>;
 }
 
-export async function GET(_req: NextRequest, ctx: RouteContext) {
+export async function GET(req: NextRequest, ctx: RouteContext) {
   const { symbol: rawSymbol } = await ctx.params;
   const symbol = rawSymbol?.toUpperCase().trim();
 
@@ -30,9 +30,10 @@ export async function GET(_req: NextRequest, ctx: RouteContext) {
     );
   }
 
+  const cookieHeader = req.headers.get("cookie");
   let session;
   try {
-    session = await requireSession();
+    session = await requireSession(cookieHeader);
   } catch {
     return NextResponse.json(
       { error: "Not authenticated.", code: "UNAUTHENTICATED" },

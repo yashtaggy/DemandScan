@@ -2,7 +2,7 @@
  * GET /api/kite/quote?symbol=NSE:INFY
  *
  * Returns a live quote for a single instrument.
- * Requires an active Kite session.
+ * Requires an active Kite session identified by the ds_sid cookie.
  *
  * Query params:
  *   symbol  — Required. Format: "EXCHANGE:TRADINGSYMBOL" (e.g. NSE:INFY)
@@ -42,9 +42,10 @@ export async function GET(req: NextRequest) {
   }
 
   // ─── Auth check ────────────────────────────────────────────────────────────
+  const cookieHeader = req.headers.get("cookie");
   let session;
   try {
-    session = await requireSession();
+    session = await requireSession(cookieHeader);
   } catch {
     return NextResponse.json(
       { error: "Not authenticated. Please connect your Zerodha account.", code: "UNAUTHENTICATED" },
@@ -72,22 +73,30 @@ export async function GET(req: NextRequest) {
     const message = err instanceof Error ? err.message : "Unknown error";
 
     // Classify Kite API errors without leaking internals
-    if (message.includes("InputException") || message.includes("Invalid")) {
-      return NextResponse.json(
-        { error: `Invalid instrument: ${symbol}`, code: "INVALID_INSTRUMENT" },
-        { status: 400 }
-      );
-    }
-    if (message.includes("TokenException")) {
+    if (message.includes("TokenException") || message.includes("token")) {
       return NextResponse.json(
         { error: "Kite session expired. Please reconnect.", code: "TOKEN_EXPIRED" },
         { status: 401 }
+      );
+    }
+    if (message.includes("PermissionException") || message.includes("subscription")) {
+      return NextResponse.json(
+        { error: "Permission denied. Check your Kite Connect subscription.", code: "PERMISSION_DENIED" },
+        { status: 403 }
       );
     }
     if (message.includes("NetworkException") || message.includes("ECONNREFUSED")) {
       return NextResponse.json(
         { error: "Network error contacting Kite Connect.", code: "NETWORK_ERROR" },
         { status: 502 }
+      );
+    }
+    // Only classify as invalid instrument when the error is clearly about the symbol,
+    // not a generic "Invalid" which could be auth-related.
+    if (message.includes("InputException")) {
+      return NextResponse.json(
+        { error: `Invalid instrument: ${symbol}`, code: "INVALID_INSTRUMENT" },
+        { status: 400 }
       );
     }
 

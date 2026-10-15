@@ -2,6 +2,7 @@
  * GET /api/stocks
  *
  * Returns stock rows for all matched Nifty 500 constituents with live quotes.
+ * Requires an active Kite session identified by the ds_sid cookie.
  *
  * Query parameters (all optional):
  *   search      — Filter by symbol prefix
@@ -39,9 +40,10 @@ function parseFloatParam(value: string | null, fallback: number): number {
 
 export async function GET(req: NextRequest) {
   // ─── Auth ──────────────────────────────────────────────────────────────────
+  const cookieHeader = req.headers.get("cookie");
   let session;
   try {
-    session = await requireSession();
+    session = await requireSession(cookieHeader);
   } catch {
     return NextResponse.json(
       { error: "Not authenticated. Please connect your Zerodha account.", code: "UNAUTHENTICATED" },
@@ -168,6 +170,12 @@ export async function GET(req: NextRequest) {
       return NextResponse.json(
         { error: "Kite session expired. Please reconnect.", code: "TOKEN_EXPIRED" },
         { status: 401 }
+      );
+    }
+    if (message.includes("PermissionException") || message.includes("subscription")) {
+      return NextResponse.json(
+        { error: "Permission denied. Check your Kite Connect subscription.", code: "PERMISSION_DENIED" },
+        { status: 403 }
       );
     }
     console.error("[api/stocks] Error:", message);

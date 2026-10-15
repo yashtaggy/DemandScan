@@ -1,22 +1,28 @@
 /**
  * GET /api/kite/status
  *
- * Returns the current authentication status.
- * NEVER returns the access token, API key, or API secret.
+ * Returns the current authentication status for the requesting browser session.
+ * Resolves the session from the HttpOnly ds_sid cookie.
+ * NEVER returns the access token, API key, API secret, or encryption key.
  */
 
-import { NextResponse } from "next/server";
-import { sessionStore } from "@/lib/kite-session";
-import { areKiteEnvVarsSet } from "@/lib/env";
+import { type NextRequest, NextResponse } from "next/server";
+import { getSessionFromRequest } from "@/lib/kite-session";
+import { areKiteEnvVarsSet, isDatabaseConfigured } from "@/lib/env";
 import { getNSEMarketStatus } from "@/lib/kite-client";
 import type { AuthStatus } from "@/lib/types";
 
 
-export async function GET() {
-  const session = await sessionStore.get();
+export async function GET(req: NextRequest) {
+  const cookieHeader = req.headers.get("cookie");
+  const session = await getSessionFromRequest(cookieHeader);
   const marketStatus = getNSEMarketStatus();
 
-  const authStatus: AuthStatus & { envConfigured: boolean; market: typeof marketStatus } = {
+  const authStatus: AuthStatus & {
+    envConfigured: boolean;
+    dbConfigured: boolean;
+    market: typeof marketStatus;
+  } = {
     authenticated: session !== null,
     userId: session?.userId,
     userName: session?.userName,
@@ -24,6 +30,7 @@ export async function GET() {
     expiresAt: session?.expiresAt,
     sessionValid: session !== null,
     envConfigured: areKiteEnvVarsSet(),
+    dbConfigured: isDatabaseConfigured(),
     market: marketStatus,
   };
 

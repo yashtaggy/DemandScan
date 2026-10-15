@@ -8,7 +8,7 @@ import { useAuth } from "@/hooks/use-auth";
 import { formatDateTime } from "@/lib/utils";
 
 export function Header({ lastRefreshed }: { lastRefreshed: string | null }) {
-  const { status, loading } = useAuth();
+  const { status, loading, refetch } = useAuth();
   const [loggingOut, setLoggingOut] = useState(false);
   const router = useRouter();
 
@@ -20,7 +20,9 @@ export function Header({ lastRefreshed }: { lastRefreshed: string | null }) {
     setLoggingOut(true);
     try {
       await fetch("/api/kite/logout", { method: "POST" });
+      // Refresh Next.js router cache and re-poll auth status
       router.refresh();
+      refetch();
     } finally {
       setLoggingOut(false);
     }
