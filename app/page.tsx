@@ -150,7 +150,7 @@ export default function DashboardPage() {
           </div>
 
           <aside className="hidden xl:block w-72 shrink-0">
-            <ScannerPanel />
+            <ScannerPanel isAuthenticated={isAuthenticated} />
           </aside>
         </div>
       </main>

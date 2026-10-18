@@ -30,3 +30,65 @@ html {
 .tabular-nums {
   font-variant-numeric: tabular-nums;
 }
+
+/* ── Scanner UI animations ─────────────────────────────────────── */
+
+/* Spinning loader used in scanner buttons and status rows */
+.scanner-spinner {
+  display: inline-block;
+  width: 0.75rem;
+  height: 0.75rem;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: scanner-spin 0.65s linear infinite;
+}
+@keyframes scanner-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Shimmer overlay on the progress bar while RUNNING */
+.scanner-progress-shimmer {
+  position: relative;
+  overflow: hidden;
+}
+.scanner-progress-shimmer::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255 255 255 / 0.25) 50%,
+    transparent 100%
+  );
+  animation: scanner-shimmer 1.4s ease-in-out infinite;
+}
+@keyframes scanner-shimmer {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+/* Tailwind v4 animate-in utilities (slide / fade) used by drawer & progress */
+@keyframes fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes slide-in-from-right {
+  from { transform: translateX(100%); }
+  to   { transform: translateX(0); }
+}
+@keyframes slide-in-from-top-1 {
+  from { transform: translateY(-0.25rem); opacity: 0; }
+  to   { transform: translateY(0);        opacity: 1; }
+}
+
+.animate-in {
+  animation-fill-mode: both;
+}
+.fade-in { animation-name: fade-in; }
+.slide-in-from-right { animation-name: slide-in-from-right; }
+.slide-in-from-top-1 { animation-name: slide-in-from-top-1; }
+.duration-200 { animation-duration: 200ms; }
+.duration-250 { animation-duration: 250ms; }
+.duration-300 { animation-duration: 300ms; }

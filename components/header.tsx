@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, usePathname } from "next/navigation";
+import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/hooks/use-auth";
@@ -11,6 +12,7 @@ export function Header({ lastRefreshed }: { lastRefreshed: string | null }) {
   const { status, loading, refetch } = useAuth();
   const [loggingOut, setLoggingOut] = useState(false);
   const router = useRouter();
+  const pathname = usePathname();
 
   const handleConnect = () => {
     window.location.href = "/api/kite/login";
@@ -49,6 +51,12 @@ export function Header({ lastRefreshed }: { lastRefreshed: string | null }) {
               <span className="ml-2 text-[10px] text-slate-500 font-medium uppercase tracking-wider hidden sm:inline">NSE Scanner</span>
             </div>
           </div>
+
+          {/* Nav links */}
+          <nav className="hidden md:flex items-center gap-1">
+            <NavLink href="/" active={pathname === "/"}>Dashboard</NavLink>
+            <NavLink href="/scanner" active={pathname === "/scanner"}>Scanner</NavLink>
+          </nav>
 
           {/* Center status row */}
           <div className="flex items-center gap-3 text-sm">
@@ -113,5 +121,20 @@ export function Header({ lastRefreshed }: { lastRefreshed: string | null }) {
         </div>
       </div>
     </header>
+  );
+}
+
+function NavLink({ href, active, children }: { href: string; active: boolean; children: React.ReactNode }) {
+  return (
+    <Link
+      href={href}
+      className={`px-3 py-1.5 text-xs rounded-md font-medium transition-colors ${
+        active
+          ? "bg-indigo-500/15 text-indigo-300 border border-indigo-500/30"
+          : "text-slate-400 hover:text-slate-200 hover:bg-slate-700/50"
+      }`}
+    >
+      {children}
+    </Link>
   );
 }
