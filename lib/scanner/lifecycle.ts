@@ -66,12 +66,14 @@ function isTouched(snapshot: PriceSnapshot, zone: Zone, buffer: number): boolean
  * Process latest price snapshots against all active zones and update their
  * lifecycle states accordingly. Appends events to `zone_events`.
  *
- * @param snapshots  Array of latest OHLCV snapshots, one per instrument.
- * @param cfg        Scanner configuration (for proximalBuffer threshold).
+ * @param snapshots     Array of latest OHLCV snapshots, one per instrument.
+ * @param cfg           Scanner configuration (for proximalBuffer threshold).
+ * @param isHistorical  If true, zone_events are flagged as historical replay records.
  */
 export async function updateZoneLifecycles(
   snapshots: PriceSnapshot[],
-  cfg: ScannerConfig
+  cfg: ScannerConfig,
+  isHistorical = false
 ): Promise<void> {
   const sql = getDb();
   const buffer = cfg.thresholds.proximalBuffer ?? 0.003;
@@ -129,7 +131,7 @@ export async function updateZoneLifecycles(
       await appendZoneEvent(zone.zoneId, 'BREAK', snapshot.date, {
         close: snapshot.close,
         distal: zone.distal,
-      });
+      }, isHistorical);
       continue;
     }
 
@@ -154,24 +156,31 @@ export async function updateZoneLifecycles(
         close: snapshot.close,
         proximal: zone.proximal,
         touchCount: newTouches,
-      });
+      }, isHistorical);
     }
   }
 }
 
 /**
  * Append an immutable event to `zone_events`.
+ * If isHistorical is true, the event is flagged as a historical replay record.
  */
 async function appendZoneEvent(
   zoneId: string,
   eventType: ZoneEventType,
   candleTs: Date,
-  details: Record<string, unknown>
+  details: Record<string, unknown>,
+  isHistorical = false
 ): Promise<void> {
   const sql = getDb();
   await sql`
-    INSERT INTO zone_events (zone_id, event_type, candle_ts, details_json)
-    VALUES (${zoneId}, ${eventType}, ${candleTs}, ${JSON.stringify(details)}::jsonb)
+    INSERT INTO zone_events (zone_id, event_type, candle_ts, details_json, is_historical, as_of_date)
+    VALUES (
+      ${zoneId}, ${eventType}, ${candleTs},
+      ${JSON.stringify(details)}::jsonb,
+      ${isHistorical},
+      ${isHistorical ? candleTs : null}::date
+    )
   `;
 }
 

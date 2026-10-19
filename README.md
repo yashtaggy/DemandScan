@@ -1,12 +1,17 @@
-# DemandScan — Personal NSE Stock Scanner
+# DemandScan — Personal NSE Supply/Demand Zone Scanner
 
-A functional NSE stock market scanner built on **Next.js 16**, **TypeScript**, and **Zerodha Kite Connect**. DemandScan is a read-only market-data application — it displays live Nifty 500 quotes and is designed as a personal tool for the account owner.
+A personal NSE stock scanner built on **Next.js 16**, **TypeScript**, and
+**Zerodha Kite Connect**. DemandScan detects multi-timeframe supply and demand
+zones across the Nifty 500 universe, scores them for quality, tracks their
+lifecycle, and computes cross-timeframe confluence and opposing-zone risk.
 
-> **⚠️ Legal notice:** This application is for the account owner's personal use only. It does not redistribute exchange data, implement trading, or claim to reproduce any third-party scanner's proprietary methodology.
+> **⚠️ Legal notice:** This application is for the account owner's personal
+> use only. It does not redistribute exchange data, implement trading, or claim
+> to reproduce any third-party scanner's proprietary methodology.
 
 ---
 
-## Features (Phase 1 — MVP)
+## Feature Status
 
 | Feature | Status |
 |---|---|
@@ -17,16 +22,21 @@ A functional NSE stock market scanner built on **Next.js 16**, **TypeScript**, a
 | NSE instrument master loading + caching | ✅ |
 | Nifty 500 batch quote retrieval | ✅ |
 | Dark-theme responsive dashboard | ✅ |
-| Symbol/name search | ✅ |
-| Sort by price, change %, volume | ✅ |
-| Gainers / Losers filter | ✅ |
-| Minimum % change filter | ✅ |
-| Configurable auto-refresh (30s / 1m / 5m) | ✅ |
-| Market status indicator (NSE hours) | ✅ |
-| Indian number formatting (L, Cr) | ✅ |
-| Supply/demand zone detection | 🔜 Phase 2 |
-| Multi-timeframe scanning | 🔜 Phase 2 |
-| WebSocket tick streaming | 🔜 Phase 2 |
+| Symbol / name search, sort, filter | ✅ |
+| Configurable auto-refresh | ✅ |
+| Market status indicator | ✅ |
+| **Instrument master sync from Kite** | ✅ Phase 2 |
+| **Incremental daily OHLCV candle ingestion** | ✅ Phase 2 |
+| **Multi-timeframe aggregation (1W/1M/3M/6M/1Y)** | ✅ Phase 3 |
+| **Pattern detection (DBR/RBR/RBD/DBD)** | ✅ Phase 4 |
+| **Zone boundaries + 0–100 strength scoring** | ✅ Phase 5 |
+| **Zone lifecycle state-machine + event log** | ✅ Phase 6 |
+| **Cross-timeframe confluence scoring** | ✅ Phase 7 |
+| **Opposing-zone risk metrics** | ✅ Phase 7 |
+| **Scanner REST API** | ✅ Phase 8 |
+| **Scanner UI: controls, progress, zone table, drawer** | ✅ Phase 9 |
+| **CSV / JSON export** | ✅ |
+| **Unit + integration test suite (73 tests)** | ✅ Phase 10 |
 
 ---
 
@@ -34,7 +44,7 @@ A functional NSE stock market scanner built on **Next.js 16**, **TypeScript**, a
 
 - **Node.js** ≥ 20.x
 - **npm** ≥ 10.x
-- A **Zerodha Kite Connect** developer account and app — https://developers.kite.trade/
+- A **Zerodha Kite Connect** developer account — https://developers.kite.trade/
 - A **Neon Postgres** database — https://neon.tech (free tier is sufficient)
 
 ---
@@ -50,9 +60,9 @@ npm install
 
 # Set up environment variables
 cp .env.example .env.local
-# Then edit .env.local with your credentials (see below)
+# Edit .env.local with your credentials (see Environment Variables below)
 
-# Run the database migration (one-time)
+# Run all database migrations (one-time setup, idempotent)
 node db/migrate.js
 ```
 
@@ -62,21 +72,14 @@ node db/migrate.js
 
 Create `.env.local` from `.env.example`. **Never commit this file.**
 
-### Required for all environments
-
 | Variable | Description |
 |---|---|
 | `KITE_API_KEY` | From https://developers.kite.trade/apps |
 | `KITE_API_SECRET` | From https://developers.kite.trade/apps |
-| `KITE_REDIRECT_URL` | Callback URL — must match Kite developer console exactly |
+| `KITE_REDIRECT_URL` | OAuth callback — must match Kite developer console exactly |
 | `KITE_TOKEN_ENCRYPTION_KEY` | 64-hex-char (32-byte) AES-256 key — see generation below |
-| `DATABASE_URL` | Neon Postgres connection string — see setup below |
-
-### Optional
-
-| Variable | Description |
-|---|---|
-| `NEXT_PUBLIC_APP_URL` | Your deployed app URL (e.g. `https://demandscan.vercel.app`). Recommended for production to ensure correct OAuth redirect origin. |
+| `DATABASE_URL` | Neon Postgres connection string |
+| `NEXT_PUBLIC_APP_URL` | *(Optional)* Deployed app URL — recommended for production |
 
 ### Generating secrets
 
@@ -87,33 +90,43 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 
 ---
 
-## Database Setup (Neon Postgres)
+## Database Setup
 
-1. Go to https://neon.tech and create a free account
-2. Create a new **project** (region: Asia / Singapore for lowest latency)
-3. From the project dashboard, copy the **Connection string** (looks like `postgres://...`)
-4. Paste it as `DATABASE_URL` in `.env.local`
-5. Run the migration:
+1. Go to https://neon.tech → create a free project (choose Asia/Singapore region)
+2. Copy the **Connection string** from the project dashboard
+3. Paste as `DATABASE_URL` in `.env.local`
+4. Run migrations:
    ```bash
    node db/migrate.js
    ```
-   This creates the `kite_sessions` table. The script is **idempotent** — safe to run multiple times, no data is deleted.
+   The script is **idempotent** — safe to run multiple times, no data is deleted.
 
-The schema is in [`db/schema.sql`](db/schema.sql).
+### Schema summary
+
+| Table | Purpose |
+|---|---|
+| `kite_sessions` | Encrypted Kite access tokens, keyed by hashed session cookie |
+| `instruments` | NSE instrument master (synced from Kite) |
+| `daily_candles` | Raw OHLCV daily candles (Phase 2) |
+| `aggregated_candles` | Weekly/monthly aggregated candles (Phase 3) |
+| `zones` | Detected supply/demand zones with scores + lifecycle state |
+| `zone_events` | Immutable audit log of zone TOUCH / RETEST / BREAK events |
+| `scan_jobs` | Job records with status and progress percentage |
+| `scanner_configs` | Versioned scanner configuration snapshots |
+| `ingestion_checkpoints` | Per-instrument last-ingested date for incremental fetches |
 
 ---
 
 ## Kite Developer Console Setup
 
-1. Log in at https://developers.kite.trade/apps
-2. Create a new app (type: **Connect**)
-3. Set **Redirect URL** to exactly:
-   - **Local**: `http://localhost:3000/api/kite/callback`
-   - **Production**: `https://your-domain.vercel.app/api/kite/callback`
-4. Note your **API Key** and **API Secret**
-5. Copy them into `.env.local`
+1. Log in at https://developers.kite.trade/apps → create a **Connect** app
+2. Set **Redirect URL**:
+   - Local: `http://localhost:3000/api/kite/callback`
+   - Production: `https://your-domain.vercel.app/api/kite/callback`
+3. Note your **API Key** and **API Secret** → paste into `.env.local`
 
-> **Important:** The redirect URL in your Kite app console must match `KITE_REDIRECT_URL` in your environment variables exactly. Any difference (trailing slash, http vs https) will cause the callback to fail.
+> **Important:** The redirect URL in Kite must match `KITE_REDIRECT_URL` exactly
+> (including protocol and no trailing slash).
 
 ---
 
@@ -123,86 +136,160 @@ The schema is in [`db/schema.sql`](db/schema.sql).
 npm run dev
 ```
 
-Then open http://localhost:3000 in your browser.
+Open http://localhost:3000 in your browser.
 
 ---
 
-## Authentication Flow
+## Running a Full Scan
 
-1. Click **"Connect with Zerodha"** on the dashboard
-2. You are redirected to Zerodha's login page
-3. After login, Zerodha redirects to `/api/kite/callback?request_token=...`
-4. The server exchanges the `request_token` for an `access_token` using the Kite SDK
-5. The `access_token` is **AES-256-GCM encrypted** and stored in Neon Postgres
-6. A cryptographically random, opaque session ID is issued in an **HttpOnly cookie** (`ds_sid`)
-7. Only the SHA-256 hash of the session ID is stored in the database
-8. Every subsequent request resolves the session from the cookie → database → decrypted token
-9. The `access_token` is **never sent to the browser**
+### Option A — Through the UI
 
-To disconnect, click **"Disconnect"** in the header. The database row is deleted and the cookie is cleared.
+1. Connect with Zerodha on the dashboard
+2. Navigate to **Scanner** (top-nav or `/scanner`)
+3. Set your desired filters (timeframe, zone side, min score)
+4. Click **Run Full Scan** — the job is queued and progress is shown live
 
-### Session Security Properties
-
-| Property | Implementation |
-|---|---|
-| Cookie is HttpOnly | ✅ — JS cannot read it |
-| Cookie is Secure in production | ✅ — HTTPS only |
-| Cookie is SameSite=Lax | ✅ — CSRF protection |
-| Token encrypted at rest | ✅ — AES-256-GCM |
-| Session ID hashed in DB | ✅ — SHA-256 |
-| Per-browser isolation | ✅ — each browser gets its own row |
-| No token in localStorage | ✅ |
-| No token in URL | ✅ |
-
-### Session Expiry
-
-Kite access tokens expire at **06:00 IST** on the next calendar day (regulatory requirement). When your session expires, the dashboard shows "Not connected" and prompts you to reconnect.
-
----
-
-## Vercel Deployment
-
-### Step 1 — Set environment variables in Vercel
-
-Go to your Vercel project → **Settings → Environment Variables** and add:
-
-| Name | Value | Environments |
-|---|---|---|
-| `KITE_API_KEY` | Your Kite API key | Production, Preview |
-| `KITE_API_SECRET` | Your Kite API secret | Production, Preview |
-| `KITE_REDIRECT_URL` | `https://your-domain.vercel.app/api/kite/callback` | Production |
-| `KITE_TOKEN_ENCRYPTION_KEY` | 64-hex-char key (generate fresh for production) | Production, Preview |
-| `DATABASE_URL` | Neon connection string | Production, Preview |
-| `NEXT_PUBLIC_APP_URL` | `https://your-domain.vercel.app` | Production |
-
-### Step 2 — Update Kite developer console
-
-In your Kite app settings, **add** your production callback URL:
-```
-https://your-domain.vercel.app/api/kite/callback
-```
-
-### Step 3 — Run the database migration against production
+### Option B — Via REST API
 
 ```bash
-# With the production DATABASE_URL set in your shell:
-DATABASE_URL="postgres://..." node db/migrate.js
+# Authenticate first (cookie required); use a tool like curl with a valid ds_sid cookie.
+
+# Step 1: Sync instruments + ingest candles (Phase 2)
+curl -X POST http://localhost:3000/api/scanner/ingest \
+  -H "Cookie: ds_sid=<your-session-cookie>" \
+  -H "Content-Type: application/json" \
+  -d '{"from":"2023-01-01","to":"2024-10-18","concurrency":5}'
+
+# Step 2: Aggregate candles into higher timeframes (Phase 3)
+curl -X POST http://localhost:3000/api/scanner/aggregate \
+  -H "Cookie: ds_sid=<your-session-cookie>"
+
+# Step 3: Run full scan (phases 4-6: pattern detection, zone scoring, lifecycle)
+curl -X POST http://localhost:3000/api/scanner/run \
+  -H "Cookie: ds_sid=<your-session-cookie>" \
+  -H "Content-Type: application/json" \
+  -d '{"from":"2023-01-01","to":"2024-10-18"}'
+
+# Step 4: Check job status
+curl http://localhost:3000/api/scanner/job/<jobId> \
+  -H "Cookie: ds_sid=<your-session-cookie>"
 ```
 
-Or run it locally with the production URL — the schema is idempotent.
+---
 
-### Step 4 — Redeploy
+## API Reference
 
-Push a new commit or trigger a manual redeploy in Vercel.
+### Authentication
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/api/kite/login` | GET | Redirects to Zerodha login |
+| `/api/kite/callback` | GET | Handles OAuth callback, issues session cookie |
+| `/api/kite/status` | GET | Returns auth status (no secrets) |
+| `/api/kite/logout` | POST | Clears session and deletes DB row |
+
+### Market Data
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/api/stocks` | GET | Nifty 500 quotes with filtering, sorting, pagination |
+| `/api/stocks/[symbol]` | GET | Single stock detail |
+| `/api/kite/quote?symbol=NSE:INFY` | GET | Live quote for one symbol |
+
+### Scanner Pipeline
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/api/scanner/ingest` | POST | Phase 2: sync instruments + ingest daily candles |
+| `/api/scanner/aggregate` | POST | Phase 3: aggregate daily → weekly/monthly/etc. candles |
+| `/api/scanner/run` | POST | Phases 4–6: full pattern detection + zone scoring + lifecycle |
+| `/api/scanner/job/[jobId]` | GET | Job status and progress percentage |
+| `/api/scanner/zones` | GET | Query detected zones with filters |
+| `/api/scanner/confluence` | GET | Phase 7: confluence score + opposition risk per zone |
+| `/api/scanner/export` | GET | Download zones as CSV or JSON |
+
+#### `/api/scanner/ingest` body params
+
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `from` | `YYYY-MM-DD` | 1 year back | Candle history start date |
+| `to` | `YYYY-MM-DD` | today | Candle history end date |
+| `concurrency` | number | `5` | Parallel Kite requests |
+
+#### `/api/scanner/zones` query params
+
+| Param | Type | Description |
+|---|---|---|
+| `instrumentId` | number | Filter by instrument token |
+| `timeframe` | `1D\|1W\|1M\|3M\|6M\|1Y` | Filter by timeframe |
+| `side` | `DEMAND\|SUPPLY` | Filter by zone side |
+| `lifecycle` | `CONFIRMED_FRESH\|TOUCHED_ONCE\|RETESTED\|BROKEN` | Filter by lifecycle state |
+| `minScore` | number | Minimum zone score (0–100) |
+| `limit` | number | Max results (default 50) |
+| `offset` | number | Pagination offset (default 0) |
+
+#### `/api/scanner/confluence` query params
+
+| Param | Type | Description |
+|---|---|---|
+| `zoneId` | string (UUID) | Compute for a specific zone |
+| `instrumentId` | number | Compute for all active zones of an instrument |
+
+#### `/api/scanner/export` query params
+
+Same filter params as `/api/scanner/zones`. Add the `Accept` header to control format:
+- `Accept: text/csv` → downloads a `.csv` file
+- `Accept: application/json` → returns JSON (default)
+
+---
+
+## Zone Scoring Rubric (0–100)
+
+| Component | Max Points | Description |
+|---|---|---|
+| Timeframe quality | 30 | 1Y=30, 6M=25, 3M=20, 1M=15, 1W=10, 1D=5 |
+| Leg-out strength | 20 | Body/range ratio of the leg-out candle |
+| Base tightness | 20 | Lower body/range → tighter base → higher score |
+| Volume surge | 10 | Leg-out volume vs 20-candle average |
+| Fresh zone bonus | 20 | Applied while lifecycle = CONFIRMED_FRESH |
+
+---
+
+## Confluence Scoring (Phase 7)
+
+**Confluence** measures how many higher-timeframe same-side zones contain a given zone.
+Each containing zone contributes its timeframe weight (same scale as zone scoring).
+Capped at 100.
+
+**Opposition risk** (0–100) measures nearby opposing zones in the trade direction
+within 20 % of the zone's proximal level. Higher = more likely price will reverse
+before reaching target.
+
+---
+
+## Zone Lifecycle State Machine
+
+```
+CONFIRMED_FRESH
+     │
+     ├─ price touches proximal ──► TOUCHED_ONCE
+     │                                   │
+     │                                   ├─ price touches again ──► RETESTED
+     │                                   │
+     │                                   └─ price closes beyond distal ──► BROKEN
+     │
+     └─ price closes beyond distal ──► BROKEN
+```
+
+> **Policy:** If a candle both touches and breaks on the same bar, BREAK takes
+> priority. The BREAK event is recorded and the touch count is NOT incremented.
 
 ---
 
 ## Running Tests
 
-Tests use Jest with mocked database and Kite SDK. **No real credentials required.**
-
 ```bash
-# Run all tests
+# All tests (no real credentials needed — DB and Kite SDK are mocked)
 npm test
 
 # Watch mode
@@ -214,12 +301,16 @@ npm run test:coverage
 
 ### Test coverage
 
-| Test file | What it covers |
+| Test file | Coverage |
 |---|---|
-| `__tests__/kite-session.test.ts` | DB session store, cookie parsing, auth helpers, cookie security attributes, expiry handling |
+| `__tests__/kite-session.test.ts` | Session store, cookie security, expiry |
 | `__tests__/kite-client.test.ts` | Quote calculation, market status |
 | `__tests__/utils.test.ts` | INR formatting, volume, % change |
-| `__tests__/nifty500.test.ts` | Constituent list deduplication, format |
+| `__tests__/nifty500.test.ts` | Constituent list deduplication |
+| `__tests__/scanner/patterns.test.ts` | DBR/RBR/RBD/DBD pattern detection |
+| `__tests__/scanner/zones.test.ts` | Zone scoring, upsert logic |
+| `__tests__/scanner/confluence.test.ts` | Confluence scoring, opposition risk |
+| `lib/scanner/__tests__/export.test.ts` | CSV serialisation |
 
 ---
 
@@ -231,53 +322,92 @@ npm run typecheck
 
 ---
 
-## API Reference
+## Vercel Deployment
 
-| Endpoint | Method | Description |
-|---|---|---|
-| `/api/kite/login` | GET | Redirects to Zerodha login |
-| `/api/kite/callback` | GET | Handles OAuth callback, issues session cookie |
-| `/api/kite/status` | GET | Returns auth status (no secrets) |
-| `/api/kite/logout` | POST | Clears session cookie and invalidates DB row |
-| `/api/kite/quote?symbol=NSE:INFY` | GET | Single instrument quote |
-| `/api/stocks` | GET | Nifty 500 with filters/sort/pagination |
-| `/api/stocks/[symbol]` | GET | Single stock detail |
+### Step 1 — Set environment variables
 
-All responses are clean JSON — never raw Kite responses, stack traces, or credentials.
+Go to **Vercel project → Settings → Environment Variables** and add all vars
+from the [Environment Variables](#environment-variables) section above.
+
+Set `KITE_REDIRECT_URL` to:
+```
+https://your-domain.vercel.app/api/kite/callback
+```
+
+### Step 2 — Update Kite developer console
+
+Add the production callback URL in your Kite app settings:
+```
+https://your-domain.vercel.app/api/kite/callback
+```
+
+### Step 3 — Run migrations against the production DB
+
+```bash
+DATABASE_URL="postgres://..." node db/migrate.js
+```
+
+### Step 4 — Verify build
+
+```bash
+npm run typecheck && npm test && npm run build
+```
+
+All three must pass before deploying.
+
+### Step 5 — Redeploy
+
+Push a new commit or trigger a manual redeploy in Vercel.
+
+> **Vercel timeout note:** The scanner pipeline is triggered fire-and-forget from
+> the API route. Each API call returns within the 10-second Vercel limit while
+> progress is tracked in the `scan_jobs` table. For long ingestion runs
+> (full Nifty 500, 1 year of history), consider running Step 2 locally:
+> `POST /api/scanner/ingest` with your production `DATABASE_URL`.
+
+---
+
+## Authentication Flow
+
+1. Click **"Connect with Zerodha"** on the dashboard
+2. Zerodha redirects to `/api/kite/callback?request_token=...`
+3. Server exchanges the token for an `access_token` via Kite SDK
+4. The `access_token` is **AES-256-GCM encrypted** and stored in Neon Postgres
+5. A cryptographically random, opaque session ID is issued as an **HttpOnly cookie** (`ds_sid`)
+6. Only the **SHA-256 hash** of the session ID is stored in the database
+7. Every subsequent request resolves: cookie → hash → DB lookup → decrypted token
+8. The `access_token` is **never sent to the browser**
+9. To disconnect: click **Disconnect** — the DB row is deleted and cookie cleared
 
 ---
 
 ## Known Limitations
 
-1. **REST polling, not WebSocket streaming** — quotes are fetched on demand or at the configured interval. This is not real-time tick-by-tick data.
-2. **Nifty 500 constituent list** — curated manually. Update `lib/nifty500.ts` after each quarterly NSE reconstitution (March, June, September, December).
-3. **Market holidays** — the market-open indicator uses clock time only. It does not account for NSE trading holidays.
-4. **Single-user design** — one Zerodha account per deployment. Each browser session is isolated but they all share the same Kite credentials.
-5. **Kite API rate limits** — the `/api/stocks` route fetches up to 500 symbols in a single batch call (Kite's documented limit). Do not set the refresh interval below 30 seconds.
+1. **REST polling, not WebSocket tick streaming** — quotes refresh on demand or
+   at the configured interval. Not real-time tick-by-tick.
+2. **Nifty 500 constituent list** — curated statically in `lib/nifty500.ts`.
+   Update it after each quarterly NSE reconstitution (March, June, September, December).
+3. **Market holidays** — the market-open indicator uses clock time only; NSE
+   trading holidays are not accounted for.
+4. **Single-user design** — one Zerodha account per deployment.
+5. **Kite API rate limits** — the candle ingestion uses exponential back-off on
+   HTTP 429. Keep `concurrency` ≤ 5 for safety.
+6. **Vercel execution limits** — the full scan pipeline is designed to be safe
+   within Vercel's 10-second serverless timeout by returning a `jobId` immediately
+   and tracking progress asynchronously. Very large runs should be triggered from
+   a local machine with a production `DATABASE_URL`.
 
 ---
 
 ## Security Notes
 
 - API key, API secret, and access token are **never** sent to the browser
-- Access token is **AES-256-GCM encrypted** in the database; only its encrypted form is stored
-- Only the **SHA-256 hash** of the session cookie ID is stored in the database
-- `KITE_TOKEN_ENCRYPTION_KEY` and `DATABASE_URL` are **server-only** variables (no `NEXT_PUBLIC_` prefix)
+- Access token is **AES-256-GCM encrypted** in the database
+- Only the **SHA-256 hash** of the session cookie ID is stored
+- `KITE_TOKEN_ENCRYPTION_KEY` and `DATABASE_URL` have **no** `NEXT_PUBLIC_` prefix
 - Callback URL is secured with `Cache-Control: no-store` and `Referrer-Policy: no-referrer`
-- All redirects from the callback are pinned to the configured app origin (no open redirect)
 - Errors returned to the browser are generic — internal details are server-log only
 - `.env.local` is in `.gitignore`; only `.env.example` (with empty values) is committed
-
----
-
-## Phase 2 — Supply/Demand Zone Scanner (Planned)
-
-The `ScannerPanel` component on the dashboard shows the planned Phase 2 controls. When Phase 2 begins:
-
-- Historical candle data will be fetched from Kite's authorized `/instruments/historical` endpoint
-- Supply and demand zone detection will be implemented as pure TypeScript functions in `lib/scanner/`
-- No calculation code will be inside React components
-- Calculations will be testable with sample datasets without real credentials
 
 ---
 

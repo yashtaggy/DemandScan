@@ -32,6 +32,8 @@ const TIMEFRAME_SCORE: Record<Timeframe, number> = {
   '1M': 15,
   '1W': 10,
   '1D': 5,
+  '4H': 3,
+  '1H': 1,
 };
 
 function clamp(value: number, min: number, max: number): number {

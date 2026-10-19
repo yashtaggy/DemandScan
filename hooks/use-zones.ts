@@ -4,10 +4,25 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import type { Zone, Timeframe, ZoneSide } from "@/lib/scanner/types";
 
 export interface ZoneFilters {
+  // Primary filters
   timeframe?: Timeframe;
   side?: ZoneSide;
   lifecycle?: string;
+  symbol?: string;
+  // Score filters
   minScore?: number;
+  minCompositeScore?: number;
+  // Distance / confluence
+  maxDistancePct?: number;
+  minConfluence?: number;
+  maxOppositionRisk?: number;
+  // Date range
+  formationFrom?: string;
+  formationTo?: string;
+  // Sort
+  sort?: "score" | "composite_score" | "formation_ts" | "distance_pct";
+  dir?: "asc" | "desc";
+  // Pagination
   limit?: number;
   offset?: number;
 }
@@ -28,7 +43,6 @@ export function useZones(filters: ZoneFilters = {}): UseZonesReturn {
   const abortRef = useRef<AbortController | null>(null);
 
   const fetchZones = useCallback(async () => {
-    // Cancel any in-flight request.
     abortRef.current?.abort();
     abortRef.current = new AbortController();
 
@@ -36,11 +50,20 @@ export function useZones(filters: ZoneFilters = {}): UseZonesReturn {
     setError(null);
 
     const params = new URLSearchParams();
-    if (filters.timeframe) params.set("timeframe", filters.timeframe);
-    if (filters.side) params.set("side", filters.side);
-    if (filters.lifecycle) params.set("lifecycle", filters.lifecycle);
-    if (filters.minScore !== undefined) params.set("minScore", String(filters.minScore));
-    if (filters.limit !== undefined) params.set("limit", String(filters.limit));
+    if (filters.timeframe)         params.set("timeframe",         filters.timeframe);
+    if (filters.side)              params.set("side",              filters.side);
+    if (filters.lifecycle)         params.set("lifecycle",         filters.lifecycle);
+    if (filters.symbol)            params.set("symbol",            filters.symbol);
+    if (filters.minScore !== undefined)          params.set("minScore",          String(filters.minScore));
+    if (filters.minCompositeScore !== undefined) params.set("minCompositeScore", String(filters.minCompositeScore));
+    if (filters.maxDistancePct !== undefined)    params.set("maxDistancePct",    String(filters.maxDistancePct));
+    if (filters.minConfluence !== undefined)     params.set("minConfluence",     String(filters.minConfluence));
+    if (filters.maxOppositionRisk !== undefined) params.set("maxOppositionRisk", String(filters.maxOppositionRisk));
+    if (filters.formationFrom)     params.set("formationFrom",     filters.formationFrom);
+    if (filters.formationTo)       params.set("formationTo",       filters.formationTo);
+    if (filters.sort)              params.set("sort",              filters.sort);
+    if (filters.dir)               params.set("dir",               filters.dir);
+    if (filters.limit !== undefined)  params.set("limit",  String(filters.limit));
     if (filters.offset !== undefined) params.set("offset", String(filters.offset));
 
     try {
@@ -60,12 +83,12 @@ export function useZones(filters: ZoneFilters = {}): UseZonesReturn {
       setLoading(false);
     }
   }, [
-    filters.timeframe,
-    filters.side,
-    filters.lifecycle,
-    filters.minScore,
-    filters.limit,
-    filters.offset,
+    filters.timeframe, filters.side, filters.lifecycle, filters.symbol,
+    filters.minScore, filters.minCompositeScore,
+    filters.maxDistancePct, filters.minConfluence, filters.maxOppositionRisk,
+    filters.formationFrom, filters.formationTo,
+    filters.sort, filters.dir,
+    filters.limit, filters.offset,
   ]);
 
   useEffect(() => {

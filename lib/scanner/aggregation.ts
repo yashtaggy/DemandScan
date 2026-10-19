@@ -21,19 +21,18 @@ export async function aggregateAllTimeframes(): Promise<void> {
   const timeframes: AggregationTimeframe[] = ['1W', '1M', '3M', '6M', '1Y'];
 
   for (const tf of timeframes) {
-    // Build the period_start expression per timeframe.
-    // daily_candles.candle_date is a DATE column (no timezone); we cast it to
-    // TIMESTAMPTZ assuming midnight IST before truncating.
     const periodExpr = getPeriodExpression(tf);
 
-    await sql.unsafe(`
+    // sql.unsafe() is used for the compile-time-constant period expression
+    // fragment only — no user data is ever injected here.
+    await sql`
       INSERT INTO aggregated_candles (
         instrument_token, timeframe, period_start,
         open, high, low, close, volume, created_at
       )
       SELECT
         sub.instrument_token,
-        '${tf}'                 AS timeframe,
+        ${tf}                   AS timeframe,
         sub.period_start,
         sub.open,
         sub.high,
@@ -44,14 +43,14 @@ export async function aggregateAllTimeframes(): Promise<void> {
       FROM (
         SELECT
           instrument_id                                         AS instrument_token,
-          (${periodExpr})                                       AS period_start,
+          (${sql.unsafe(periodExpr)})                          AS period_start,
           (ARRAY_AGG(open  ORDER BY candle_date ASC ))[1]      AS open,
           MAX(high)                                             AS high,
           MIN(low)                                              AS low,
           (ARRAY_AGG(close ORDER BY candle_date DESC))[1]      AS close,
           SUM(volume)                                           AS volume
         FROM daily_candles
-        GROUP BY instrument_id, (${periodExpr})
+        GROUP BY instrument_id, (${sql.unsafe(periodExpr)})
       ) sub
       ON CONFLICT (instrument_token, timeframe, period_start)
       DO UPDATE SET
@@ -61,9 +60,10 @@ export async function aggregateAllTimeframes(): Promise<void> {
         close      = EXCLUDED.close,
         volume     = EXCLUDED.volume,
         created_at = EXCLUDED.created_at
-    `);
+    `;
   }
 }
+
 
 /**
  * Returns the SQL expression that computes the period_start DATE for a row in
@@ -87,6 +87,12 @@ function getPeriodExpression(tf: AggregationTimeframe): string {
         )`;
     case '1Y':
       return "date_trunc('year', candle_date)::date";
+    case '4H':
+      // 4H is aggregated from hourly_candles, not daily_candles.
+      // This case should never be reached in aggregateAllTimeframes (which only runs
+      // daily→weekly/monthly/quarterly/half-yearly/yearly), but TypeScript requires
+      // exhaustive handling of all AggregationTimeframe members.
+      throw new Error(`Timeframe '4H' must be aggregated via four_hour_agg.ts, not aggregation.ts`);
   }
 }
 
@@ -101,21 +107,21 @@ export async function aggregateInstrument(instrumentId: number): Promise<void> {
   for (const tf of timeframes) {
     const periodExpr = getPeriodExpression(tf);
 
-    await sql.unsafe(`
+    await sql`
       INSERT INTO aggregated_candles (
         instrument_token, timeframe, period_start,
         open, high, low, close, volume, created_at
       )
       SELECT
         sub.instrument_token,
-        '${tf}'        AS timeframe,
+        ${tf}        AS timeframe,
         sub.period_start,
         sub.open, sub.high, sub.low, sub.close, sub.volume,
         NOW()          AS created_at
       FROM (
         SELECT
           instrument_id                                         AS instrument_token,
-          (${periodExpr})                                       AS period_start,
+          (${sql.unsafe(periodExpr)})                          AS period_start,
           (ARRAY_AGG(open  ORDER BY candle_date ASC ))[1]      AS open,
           MAX(high)                                             AS high,
           MIN(low)                                              AS low,
@@ -123,7 +129,7 @@ export async function aggregateInstrument(instrumentId: number): Promise<void> {
           SUM(volume)                                           AS volume
         FROM daily_candles
         WHERE instrument_id = ${instrumentId}
-        GROUP BY instrument_id, (${periodExpr})
+        GROUP BY instrument_id, (${sql.unsafe(periodExpr)})
       ) sub
       ON CONFLICT (instrument_token, timeframe, period_start)
       DO UPDATE SET
@@ -133,7 +139,7 @@ export async function aggregateInstrument(instrumentId: number): Promise<void> {
         close      = EXCLUDED.close,
         volume     = EXCLUDED.volume,
         created_at = EXCLUDED.created_at
-    `);
+    `;
   }
 }
 

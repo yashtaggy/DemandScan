@@ -199,8 +199,13 @@ export function detectPatterns(
 import { getDb } from '@/lib/db';
 
 /**
- * Fetch candles from DB for an instrument + timeframe (daily or aggregated)
- * and return all detected pattern matches.
+ * Fetch candles from DB for an instrument + timeframe and return all detected
+ * pattern matches. Handles all eight supported timeframes:
+ *
+ *   1H  → hourly_candles (is_session_complete = TRUE only)
+ *   4H  → four_hour_candles (is_complete = TRUE — AM sessions only)
+ *   1D  → daily_candles
+ *   1W/1M/3M/6M/1Y → aggregated_candles
  */
 export async function detectPatternsForInstrument(
   instrumentId: number,
@@ -211,7 +216,30 @@ export async function detectPatternsForInstrument(
   const sql = getDb();
   let rows: any[];
 
-  if (timeframe === '1D') {
+  if (timeframe === '1H') {
+    rows = await sql`
+      SELECT instrument_id AS instrument_token,
+             candle_ts     AS period_start,
+             open, high, low, close, volume
+      FROM hourly_candles
+      WHERE instrument_id       = ${instrumentId}
+        AND is_session_complete = TRUE
+      ORDER BY candle_ts ASC
+      LIMIT ${limit}
+    `;
+  } else if (timeframe === '4H') {
+    // Only complete AM sessions are eligible for zone formation
+    rows = await sql`
+      SELECT instrument_id AS instrument_token,
+             session_ts    AS period_start,
+             open, high, low, close, volume
+      FROM four_hour_candles
+      WHERE instrument_id = ${instrumentId}
+        AND is_complete   = TRUE
+      ORDER BY session_ts ASC
+      LIMIT ${limit}
+    `;
+  } else if (timeframe === '1D') {
     rows = await sql`
       SELECT instrument_id AS instrument_token,
              candle_date   AS period_start,
@@ -228,7 +256,7 @@ export async function detectPatternsForInstrument(
              open, high, low, close, volume
       FROM aggregated_candles
       WHERE instrument_token = ${instrumentId}
-        AND timeframe = ${timeframe}
+        AND timeframe        = ${timeframe}
       ORDER BY period_start ASC
       LIMIT ${limit}
     `;
@@ -243,6 +271,7 @@ export async function detectPatternsForInstrument(
     close: Number(r.close),
     volume: Number(r.volume),
     source: 'db',
+    isComplete: true,
   }));
 
   return detectPatterns(candles, instrumentId, timeframe, cfg);

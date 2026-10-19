@@ -46,6 +46,36 @@ export default function ScannerPage() {
     setPage(1);
   }
 
+  // Export zones as JSON or CSV
+  function handleExport(format: 'json' | 'csv') {
+    const params = new URLSearchParams();
+    if (filters.timeframe) params.set('timeframe', filters.timeframe);
+    if (filters.side) params.set('side', filters.side);
+    if (filters.lifecycle) params.set('lifecycle', filters.lifecycle);
+    if (filters.minScore !== undefined) params.set('minScore', String(filters.minScore));
+    if (filters.limit !== undefined) params.set('limit', String(filters.limit));
+    if (filters.offset !== undefined) params.set('offset', String(filters.offset));
+
+    const url = `/api/scanner/export?${params.toString()}`;
+    const accept = format === 'csv' ? 'text/csv' : 'application/json';
+    fetch(url, { headers: { accept } })
+      .then((res) => {
+        if (!res.ok) throw new Error(`Export failed ${res.status}`);
+        return res.blob();
+      })
+      .then((blob) => {
+        const filename = `zones.${format}`;
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = filename;
+        link.click();
+        URL.revokeObjectURL(link.href);
+      })
+      .catch((err) => console.error(err));
+  }
+
+  
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
       <Header lastRefreshed={null} />
@@ -123,6 +153,23 @@ export default function ScannerPage() {
                   launching={launching}
                   isAuthenticated={isAuthenticated}
                 />
+                {/* Export buttons */}
+                <div className="flex gap-2 mt-3">
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => handleExport('json')}
+                  >
+                    Export JSON
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => handleExport('csv')}
+                  >
+                    Export CSV
+                  </Button>
+                </div>
               </div>
 
               {/* ── Stats card ── */}
