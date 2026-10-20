@@ -203,6 +203,7 @@ curl http://localhost:3000/api/scanner/job/<jobId> \
 | `/api/scanner/ingest` | POST | Phase 2: sync instruments + ingest daily candles |
 | `/api/scanner/aggregate` | POST | Phase 3: aggregate daily → weekly/monthly/etc. candles |
 | `/api/scanner/run` | POST | Phases 4–6: full pattern detection + zone scoring + lifecycle |
+| `/api/scanner/batch` | POST | Browser-driven worker: processes one bounded batch of the active job |
 | `/api/scanner/job/[jobId]` | GET | Job status and progress percentage |
 | `/api/scanner/zones` | GET | Query detected zones with filters |
 | `/api/scanner/confluence` | GET | Phase 7: confluence score + opposition risk per zone |

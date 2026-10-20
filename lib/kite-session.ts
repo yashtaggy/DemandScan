@@ -206,7 +206,8 @@ export async function requireSession(
 
 /**
  * Resolve a Kite session from the stored SHA-256 cookie hash.
- * Used by the scan worker when a cron request has no `ds_sid` cookie.
+ * Used by the scan worker to reload the encrypted Kite token when only the
+ * job's stored session_id_hash is available.
  * Does not change encryption, cookies, or token handling.
  */
 export async function getSessionByIdHash(

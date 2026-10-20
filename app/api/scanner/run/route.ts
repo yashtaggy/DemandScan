@@ -14,8 +14,9 @@ export const maxDuration = 60;
  * POST /api/scanner/run
  *
  * Queues a resumable scan and immediately processes the first bounded batch.
- * Remaining work is continued by POST /api/scanner/batch (UI) and by Vercel
- * Cron GET /api/scanner/batch when CRON_SECRET is configured.
+ * Remaining work is continued by the browser via POST /api/scanner/batch,
+ * which keeps requesting bounded batches until the job reaches a terminal
+ * state (SUCCESS or FAILED). Progress pauses if the browser is closed.
  *
  * Body (optional JSON):
  *  {
