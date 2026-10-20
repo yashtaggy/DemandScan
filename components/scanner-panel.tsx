@@ -49,11 +49,12 @@ export function ScannerPanel({ isAuthenticated }: ScannerPanelProps) {
           <ScannerControls
             filters={filters}
             onFiltersChange={setFilters}
-            onRunScan={() => launch()}
+            onRunScan={() => launch(filters.symbol ? { symbols: [filters.symbol] } : {})}
             onRefreshZones={refetch}
             isRunning={isRunning}
             launching={launching}
             isAuthenticated={isAuthenticated}
+            runSymbol={filters.symbol}
           />
 
           {/* Zone results */}

@@ -129,33 +129,21 @@ export async function ingestDailyCandles(
 
     // Kite historical API expects dates in "YYYY-MM-DD HH:MM:SS" format.
     try {
-      // The official JS SDK method is `historicalData`.
-      // Types are loose; we cast the result.
-      const raw = (await (kc as any).historicalData(
-        instrumentId,
-        fromStr,
-        toStr,
-        "day",
-        false,
-        false
-      )) as any[];
+      // kiteconnect v5 API: getHistoricalData(token, interval, from, to).
+      // Returns HistoricalData[] — objects with named fields, not arrays.
+      const raw = await kc.getHistoricalData(instrumentId, "day", fromStr, toStr);
 
-      // Transform raw to our Candle shape.
-      const candles: Candle[] = raw.map((row) => {
-        // Row format from SDK: [timestamp, open, high, low, close, volume]
-        // Timestamp is ISO string.
-        const [ts, open, high, low, close, volume] = row;
-        return {
-          instrumentId,
-          date: new Date(ts),
-          open: Number(open),
-          high: Number(high),
-          low: Number(low),
-          close: Number(close),
-          volume: Number(volume),
-          source: "kite",
-        };
-      });
+      // Transform SDK rows to our Candle shape.
+      const candles: Candle[] = raw.map((row) => ({
+        instrumentId,
+        date: new Date(row.date),
+        open: Number(row.open),
+        high: Number(row.high),
+        low: Number(row.low),
+        close: Number(row.close),
+        volume: Number(row.volume),
+        source: "kite",
+      }));
 
       await upsertCandles(candles);
       totalInserted += candles.length;
@@ -170,8 +158,12 @@ export async function ingestDailyCandles(
       fetchStart = new Date(chunkEnd.getTime() + 24 * 60 * 60 * 1000);
       attempt = 0; // reset back‑off after success
     } catch (err: any) {
-      // Detect rate‑limit (429) or temporary network errors.
-      const isRateLimit = err?.statusCode === 429 || err?.message?.includes("rate limit");
+      // Detect rate‑limit (429) or temporary network errors. The SDK rejects
+      // with { error_type, message } (Kite 429s say "Too many requests").
+      const message = String(err?.message ?? "");
+      const isRateLimit =
+        err?.statusCode === 429 ||
+        /rate limit|too many requests/i.test(message);
       if (isRateLimit && attempt < maxAttempts) {
         const backoff = Math.pow(2, attempt) * 1000 + Math.random() * 500; // jitter
         attempt++;

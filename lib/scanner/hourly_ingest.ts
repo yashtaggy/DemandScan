@@ -155,21 +155,15 @@ export async function ingestHourlyCandles(
     const toStr   = toKiteDateStr(chunkEnd, true);
 
     try {
-      const raw = (await (kc as any).historicalData(
-        instrumentId,
-        fromStr,
-        toStr,
-        '60minute',
-        false,
-        false
-      )) as any[];
+      // kiteconnect v5 API: getHistoricalData(token, interval, from, to).
+      // Returns HistoricalData[] — objects with named fields, not arrays.
+      const raw = await kc.getHistoricalData(instrumentId, '60minute', fromStr, toStr);
 
       const sql2 = getDb();
       let chunkInserted = 0;
 
       for (const row of raw) {
-        const [ts, open, high, low, close, volume] = row;
-        const candleTs = new Date(ts);
+        const candleTs = new Date(row.date);
         const withinSession = isWithinSession(candleTs);
 
         await sql2`
@@ -179,8 +173,8 @@ export async function ingestHourlyCandles(
           ) VALUES (
             ${instrumentId},
             ${candleTs},
-            ${Number(open)}, ${Number(high)}, ${Number(low)}, ${Number(close)},
-            ${Number(volume)},
+            ${Number(row.open)}, ${Number(row.high)}, ${Number(row.low)}, ${Number(row.close)},
+            ${Number(row.volume)},
             ${withinSession},
             'kite'
           )
@@ -199,14 +193,16 @@ export async function ingestHourlyCandles(
       totalInserted += chunkInserted;
 
       if (raw.length > 0) {
-        const lastTs = new Date(raw[raw.length - 1][0]);
-        await setCheckpoint(instrumentId, lastTs);
+        await setCheckpoint(instrumentId, new Date(raw[raw.length - 1].date));
       }
 
       fetchStart = new Date(chunkEnd.getTime() + 24 * 60 * 60 * 1000);
       attempt = 0;
     } catch (err: any) {
-      const isRateLimit = err?.statusCode === 429 || String(err?.message).includes('rate limit');
+      const message = String(err?.message ?? "");
+      const isRateLimit =
+        err?.statusCode === 429 ||
+        /rate limit|too many requests/i.test(message);
       if (isRateLimit && attempt < maxAttempts) {
         const backoff = Math.pow(2, attempt) * 1000 + Math.random() * 500;
         attempt++;

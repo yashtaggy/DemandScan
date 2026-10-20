@@ -147,11 +147,12 @@ export default function ScannerPage() {
                 <ScannerControls
                   filters={filters}
                   onFiltersChange={handleFiltersChange}
-                  onRunScan={() => launch()}
+                  onRunScan={() => launch(filters.symbol ? { symbols: [filters.symbol] } : {})}
                   onRefreshZones={refetch}
                   isRunning={isRunning}
                   launching={launching}
                   isAuthenticated={isAuthenticated}
+                  runSymbol={filters.symbol}
                 />
                 {/* Export buttons */}
                 <div className="flex gap-2 mt-3">

@@ -13,6 +13,8 @@ interface ScannerControlsProps {
   isRunning: boolean;
   launching: boolean;
   isAuthenticated: boolean;
+  /** Symbol currently in the symbol filter — scopes the scan when set. */
+  runSymbol?: string;
 }
 
 const TIMEFRAMES: Array<Timeframe | "ALL"> = ["ALL", "1H", "4H", "1D", "1W", "1M", "3M", "6M", "1Y"];
@@ -35,7 +37,7 @@ const SORT_OPTIONS: Array<{ value: NonNullable<ZoneFilters["sort"]>; label: stri
 
 export function ScannerControls({
   filters, onFiltersChange, onRunScan, onRefreshZones,
-  isRunning, launching, isAuthenticated,
+  isRunning, launching, isAuthenticated, runSymbol,
 }: ScannerControlsProps) {
   const busy = isRunning || launching;
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -65,7 +67,7 @@ export function ScannerControls({
               <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <polygon points="5 3 19 12 5 21 5 3" />
               </svg>
-              Run Full Scan
+              {runSymbol ? `Scan ${runSymbol}` : "Run Full Scan"}
             </span>
           )}
         </Button>

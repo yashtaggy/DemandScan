@@ -347,6 +347,36 @@ describe('processScanBatch', () => {
     expect(store.jobs.get('job-1')?.status).toBe('SUCCESS');
   });
 
+  test('surfaces a useful API error from the ingest worker instead of a silent success', async () => {
+    const store = new MemoryStore(makeJob({ current_stage: 'INGEST_DAILY', max_retries: 5 }));
+    const workers = makeWorkers({
+      ingestDaily: jest.fn(async () => {
+        // Real kiteconnect v5 rejection shape from getHistoricalData.
+        throw { error_type: 'InputException', message: 'no candles found for instrument', data: null };
+      }),
+    });
+
+    const result = await processScanBatch({ jobId: 'job-1', session }, store, workers);
+
+    expect(result.claimed).toBe(true);
+    expect(result.status).toBe('RUNNING'); // retry 1 of 5 — job not silently complete
+    expect(result.moreRemaining).toBe(true);
+    expect(result.errorMessage).toBe('no candles found for instrument');
+    expect(store.batches[0].status).toBe('FAILED');
+    expect(store.jobs.get('job-1')?.retry_count).toBe(1);
+    expect(store.jobs.get('job-1')?.progress_percent).toBe(0);
+
+    // One retry left — the next failure exhausts retries and fails the job.
+    const job = store.jobs.get('job-1')!;
+    job.retry_count = job.max_retries - 1;
+    const failed = await processScanBatch({ jobId: 'job-1', session }, store, workers);
+    expect(failed.status).toBe('FAILED');
+    expect(failed.moreRemaining).toBe(false);
+    expect(failed.errorMessage).toBe('no candles found for instrument');
+    expect(store.jobs.get('job-1')?.status).toBe('FAILED');
+    expect(store.jobs.get('job-1')?.completed_at).toBeTruthy();
+  });
+
   test('retries the same ingest ids after a failed batch (idempotent checkpoint)', async () => {
     const store = new MemoryStore(makeJob({ current_stage: 'INGEST_DAILY', instrument_ids: [101] }));
     let attempts = 0;
