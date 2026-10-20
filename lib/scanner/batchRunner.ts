@@ -163,6 +163,21 @@ function isRunnableStatus(status: ScanJobStatus): boolean {
   return status === 'PENDING' || status === 'RUNNING';
 }
 
+/**
+ * Make an error safe for server logs: cap the length and redact anything that
+ * looks like a credential (Kite tokens, API keys, Postgres URLs). Never log
+ * raw `err` objects — they can carry request headers or connection strings.
+ */
+function sanitizeErrorMessage(raw: unknown): string {
+  const text = String(
+    (raw as { message?: unknown } | null | undefined)?.message ?? raw ?? 'Unknown batch error'
+  );
+  return text
+    .replace(/(access_token|api_key|request_token|public_token|enctoken)=([^\s&]+)/gi, '$1=<redacted>')
+    .replace(/postgres(ql)?:\/\/[^\s"']+@[^\s"']+/gi, 'postgres://<redacted>')
+    .slice(0, 500);
+}
+
 async function unclaimedResult(
   jobId: string | undefined,
   sessionIdHash: string | null,
@@ -270,10 +285,15 @@ export async function processScanBatch(
       processedInBatch: result.processedInBatch,
     };
   } catch (err: any) {
-    const message = err?.message ?? 'Unknown batch error';
+    const message = sanitizeErrorMessage(err);
     await store.failBatch(batchId, message);
     const retries = claimed.retry_count + 1;
     const exhausted = retries >= claimed.max_retries;
+    console.error(
+      `[scanner] batch failed: jobId=${claimed.job_id} batchId=${batchId} ` +
+        `stage=${claimed.current_stage} attempt=${retries}/${claimed.max_retries}` +
+        `${exhausted ? ' (retry budget exhausted; job FAILED)' : ''} error=${message}`
+    );
     await store.persist({
       jobId: claimed.job_id,
       status: exhausted ? 'FAILED' : 'RUNNING',

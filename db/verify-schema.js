@@ -25,70 +25,10 @@ try {
 
 /**
  * The schema contract the current code requires.
- * Keep in sync with lib/scanner/jobs.ts, lib/kite-session.ts,
- * lib/scanner/score.ts / confluence.ts (zone scoring columns).
+ * Single source of truth lives in db/expected-schema.js (also asserted by
+ * __tests__/scanner/schema.test.ts against the repo migration files).
  */
-const EXPECTED_SCHEMA = {
-  kite_sessions: [
-    'session_id_hash',
-    'encrypted_access_token',
-    'user_id',
-    'user_name',
-    'email',
-    'login_time',
-    'expires_at',
-    'created_at',
-  ],
-  scan_jobs: [
-    'job_id',
-    'started_at',
-    'completed_at',
-    'status',
-    'progress_percent',
-    'error_message',
-    'config_id',
-    // 2026-10-20 resumable batch checkpoints — the columns missing in production
-    // when POST /api/scanner/run fails with 42703 "session_id_hash does not exist".
-    'session_id_hash',
-    'from_date',
-    'to_date',
-    'concurrency',
-    'current_stage',
-    'cursor_instrument_id',
-    'instrument_ids',
-    'requested_symbols',
-    'retry_count',
-    'max_retries',
-    'lease_owner',
-    'lease_expires_at',
-    'total_instruments',
-    'processed_instruments',
-  ],
-  scan_job_batches: [
-    'batch_id',
-    'job_id',
-    'stage',
-    'cursor_start',
-    'cursor_end',
-    'instrument_ids',
-    'status',
-    'attempt',
-    'error_message',
-    'lease_owner',
-    'started_at',
-    'completed_at',
-  ],
-  zones: [
-    // v1 composite scoring columns
-    'composite_score',
-    'score_components',
-    'distance_pct',
-    'confluence_score',
-    'opposition_risk',
-    'data_quality_score',
-  ],
-  scanner_configs: ['config_id', 'version', 'created_at', 'config_json'],
-};
+const { EXPECTED_SCHEMA } = require('./expected-schema');
 
 async function main() {
   const url = process.env.DATABASE_URL;

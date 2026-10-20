@@ -35,18 +35,12 @@ async function migrate() {
   const sql = neon(url);
 
   // Helper to execute a .sql file (may contain multiple statements separated by ';')
+  // Comments must be stripped BEFORE splitting on ';' — comment text can itself
+  // contain ';' (see db/migrations/2024-10-18-v1-*.sql), which produced garbage
+  // statements and crashed the runner mid-file, leaving databases partially migrated.
+  const { splitStatements } = require('./sql-statements');
   async function applySqlFile(filePath) {
-    const sqlText = readFileSync(filePath, 'utf8');
-    const statements = sqlText
-      .split(';')
-      .map((s) =>
-        s
-          .split('\n')
-          .filter((line) => !line.trim().startsWith('--'))
-          .join('\n')
-          .trim()
-      )
-      .filter((s) => s.length > 0);
+    const statements = splitStatements(readFileSync(filePath, 'utf8'));
     for (const stmt of statements) {
       await sql.query(stmt, []);
     }

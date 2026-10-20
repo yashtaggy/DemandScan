@@ -255,6 +255,45 @@ describe('processScanBatch', () => {
     expect(store.jobs.get('job-1')?.cursor_instrument_id).toBe(0);
   });
 
+  test('surfaces the underlying 42P01 missing-relation error from INGEST_HOURLY (the production failure)', async () => {
+    const missingRelation: any = new Error(
+      'relation "hourly_ingestion_checkpoints" does not exist'
+    );
+    missingRelation.code = '42P01';
+    const store = new MemoryStore(
+      makeJob({ current_stage: 'INGEST_HOURLY', retry_count: 2, max_retries: 3 })
+    );
+    const workers = makeWorkers({
+      ingestHourly: jest.fn(async () => {
+        throw missingRelation;
+      }),
+    });
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    const result = await processScanBatch({ jobId: 'job-1', session }, store, workers);
+
+    // The persisted/returned message carries the real Postgres error, not a
+    // generic "batch failed", so the UI and Vercel logs show the true cause.
+    expect(result.status).toBe('FAILED');
+    expect(result.errorMessage).toContain('hourly_ingestion_checkpoints');
+    expect(result.errorMessage).toContain('does not exist');
+    expect(store.batches[0].status).toBe('FAILED');
+    expect(store.batches[0].error).toContain('hourly_ingestion_checkpoints');
+    expect(store.jobs.get('job-1')?.error_message).toContain('hourly_ingestion_checkpoints');
+    expect(store.jobs.get('job-1')?.status).toBe('FAILED');
+
+    // Sanitized server-side log line includes job/stage/attempt context.
+    const logLine = errorSpy.mock.calls.map((c) => String(c[0])).find((l) =>
+      l.includes('[scanner] batch failed')
+    );
+    expect(logLine).toBeDefined();
+    expect(logLine).toContain('job-1');
+    expect(logLine).toContain('INGEST_HOURLY');
+    expect(logLine).toContain('attempt=3/3');
+    expect(logLine).toContain('hourly_ingestion_checkpoints');
+    errorSpy.mockRestore();
+  });
+
   test('prevents a second worker from processing the same leased job', async () => {
     const store = new MemoryStore(makeJob());
     const workers = makeWorkers({

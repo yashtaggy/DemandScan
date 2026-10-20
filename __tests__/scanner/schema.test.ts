@@ -8,14 +8,29 @@
  * not run migrations — db/migrate.js is manual — so the live scan_jobs table
  * stayed in its 2024-10-18 shape while the code queried the new columns.
  *
- * These tests parse db/schema.sql + db/migrations/*.sql the same way
- * db/migrate.js applies them and assert that every table/column the code
- * expects is provided by the repo migrations. They fail loudly if code and
- * migrations drift apart again.
+ * The follow-up production failure (`relation "hourly_ingestion_checkpoints"
+ * does not exist`, code 42P01, during INGEST_HOURLY) had a deeper cause: the
+ * old db/migrate.js split migration files on ';' BEFORE stripping '--' comment
+ * lines. Semicolons inside the v1 migration's own comments produced garbage
+ * statements that crashed the runner mid-file, so NO database ever received
+ * the tables after the crash point — including hourly_ingestion_checkpoints.
+ *
+ * These tests parse db/schema.sql + db/migrations/*.sql and assert:
+ *   1. Every table/column in the shared contract (db/expected-schema.js) is
+ *      provided by the repo migrations.
+ *   2. The fixed statement splitter used by db/migrate.js produces only valid
+ *      statements for every .sql file — the comment-semicolon bug stays fixed.
  */
 
 import { readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
+
+// Shared contract (also used by db/verify-schema.js at runtime) and the fixed
+// statement splitter used by db/migrate.js. Both are CommonJS — require() them.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { EXPECTED_SCHEMA } = require(join(__dirname, '..', '..', 'db', 'expected-schema'));
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { splitStatements } = require(join(__dirname, '..', '..', 'db', 'sql-statements'));
 
 const DB_DIR = join(__dirname, '..', '..', 'db');
 const MIGRATIONS_DIR = join(DB_DIR, 'migrations');
@@ -109,74 +124,12 @@ describe('database schema matches application code (schema-drift guard)', () => 
     expect(missing).toEqual([]);
   };
 
-  test('kite_sessions has every column used by lib/kite-session.ts', () => {
-    expectColumns('kite_sessions', [
-      'session_id_hash', // SHA-256 of ds_sid cookie — PRIMARY KEY
-      'encrypted_access_token', // AES-256-GCM encrypted Kite token
-      'user_id',
-      'user_name',
-      'email',
-      'login_time',
-      'expires_at',
-      'created_at',
-    ]);
-  });
-
-  test('scan_jobs has every column used by lib/scanner/jobs.ts (incl. session_id_hash)', () => {
-    expectColumns('scan_jobs', [
-      'job_id',
-      'started_at',
-      'completed_at',
-      'status',
-      'progress_percent',
-      'error_message',
-      'config_id',
-      // Ownership + resumable-checkpoint columns added for the browser-driven
-      // scan worker. session_id_hash is the column production was missing
-      // when POST /api/scanner/run returned HTTP 500 (NeonDbError 42703).
-      'session_id_hash',
-      'from_date',
-      'to_date',
-      'concurrency',
-      'current_stage',
-      'cursor_instrument_id',
-      'instrument_ids',
-      'requested_symbols',
-      'retry_count',
-      'max_retries',
-      'lease_owner',
-      'lease_expires_at',
-      'total_instruments',
-      'processed_instruments',
-    ]);
-  });
-
-  test('scan_job_batches has every column used by lib/scanner/jobs.ts', () => {
-    expectColumns('scan_job_batches', [
-      'batch_id',
-      'job_id',
-      'stage',
-      'cursor_start',
-      'cursor_end',
-      'instrument_ids',
-      'status',
-      'attempt',
-      'error_message',
-      'lease_owner',
-      'started_at',
-      'completed_at',
-    ]);
-  });
-
-  test('zones has the v1 composite-scoring columns used by score/confluence', () => {
-    expectColumns('zones', [
-      'composite_score',
-      'score_components',
-      'distance_pct',
-      'confluence_score',
-      'opposition_risk',
-      'data_quality_score',
-    ]);
+  test('every table/column in the shared contract is created by the repo migrations', () => {
+    for (const [table, columns] of Object.entries(
+      EXPECTED_SCHEMA as Record<string, string[]>
+    )) {
+      expectColumns(table, columns);
+    }
   });
 
   test('scan_job_batches.job_id references scan_jobs(job_id) for checkpoint integrity', () => {
@@ -199,5 +152,62 @@ describe('database schema matches application code (schema-drift guard)', () => 
     expect(sql).not.toMatch(/DROP\s+TABLE/i);
     expect(sql).not.toMatch(/TRUNCATE/i);
     expect(sql).not.toMatch(/DELETE\s+FROM/i);
+  });
+});
+
+describe('db/migrate.js statement splitter (db/sql-statements.js)', () => {
+  // Root cause of the production `relation "hourly_ingestion_checkpoints" does
+  // not exist` failure: the old migrate.js split the whole file on ';' FIRST,
+  // then stripped comment lines. Comment text in the v1 migration contains
+  // semicolons ("(4 full 60-min candles; is_complete = TRUE)"), which produced
+  // garbage statements and crashed the runner mid-file — so every database
+  // stopped applying migrations at that point and never reached section H
+  // (hourly_ingestion_checkpoints).
+  const files = loadSqlFiles();
+
+  test('every .sql file splits into at least one statement', () => {
+    for (const { name, sql } of files) {
+      expect(splitStatements(sql).length).toBeGreaterThan(0);
+    }
+  });
+
+  test('no statement is garbage left over from a comment (v1 regression)', () => {
+    const v1 = files.find((f) => f.name.includes('v1-intraday-scoring-history'));
+    expect(v1).toBeDefined();
+    const statements: string[] = splitStatements(v1!.sql);
+    // The comment fragments the old splitter produced:
+    expect(statements).not.toContain('is_complete = TRUE)');
+    expect(statements.some((s) => s.startsWith('is_complete'))).toBe(false);
+    // The section that follows the offending comment must survive intact:
+    expect(statements.some((s) => /^CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+four_hour_candles/i.test(s))).toBe(true);
+  });
+
+  test('every statement starts with a known SQL keyword', () => {
+    const starter = /^(CREATE|ALTER|INSERT|UPDATE|DELETE|SELECT|COMMENT|GRANT)\b/i;
+    for (const { name, sql } of files) {
+      for (const stmt of splitStatements(sql)) {
+        expect({ file: name, statement: stmt }).toEqual(
+          expect.objectContaining({ statement: expect.stringMatching(starter) })
+        );
+      }
+    }
+  });
+
+  test('the v1 migration produces one CREATE TABLE per pipeline table it defines', () => {
+    const v1 = files.find((f) => f.name.includes('v1-intraday-scoring-history'));
+    const statements: string[] = splitStatements(v1!.sql);
+    for (const table of [
+      'hourly_candles',
+      'four_hour_candles',
+      'candle_coverage',
+      'backfill_jobs',
+      'nifty500_membership',
+      'hourly_ingestion_checkpoints',
+    ]) {
+      const found = statements.some((s) =>
+        new RegExp(`^CREATE\\s+TABLE\\s+IF\\s+NOT\\s+EXISTS\\s+${table}\\b`, 'i').test(s)
+      );
+      expect({ table, found }).toEqual({ table, found: true });
+    }
   });
 });
