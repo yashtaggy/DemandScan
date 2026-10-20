@@ -11,21 +11,41 @@ export interface ScanJob {
   errorMessage: string | null;
   startedAt: string;
   completedAt: string | null;
+  currentStage: string | null;
 }
 
 export interface UseScannerJobReturn {
   job: ScanJob | null;
   launching: boolean;
-  launch: (opts?: { from?: string; to?: string; concurrency?: number }) => Promise<void>;
+  launch: (opts?: {
+    from?: string;
+    to?: string;
+    concurrency?: number;
+    symbols?: string[];
+    instrumentIds?: number[];
+  }) => Promise<void>;
   reset: () => void;
 }
 
 const POLL_INTERVAL_MS = 2000;
 
+function mapJob(jobId: string, raw: any): ScanJob {
+  return {
+    jobId,
+    status: raw?.status ?? null,
+    progressPercent: raw?.progress_percent ?? 0,
+    errorMessage: raw?.error_message ?? null,
+    startedAt: raw?.started_at ?? "",
+    completedAt: raw?.completed_at ?? null,
+    currentStage: raw?.current_stage ?? null,
+  };
+}
+
 export function useScannerJob(): UseScannerJobReturn {
   const [job, setJob] = useState<ScanJob | null>(null);
   const [launching, setLaunching] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const workerAbort = useRef<AbortController | null>(null);
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
@@ -34,34 +54,73 @@ export function useScannerJob(): UseScannerJobReturn {
     }
   }, []);
 
+  const stopWorker = useCallback(() => {
+    workerAbort.current?.abort();
+    workerAbort.current = null;
+  }, []);
+
   const pollJob = useCallback(async (jobId: string) => {
     try {
       const res = await fetch(`/api/scanner/job/${jobId}`, { cache: "no-store" });
       if (!res.ok) return;
       const data = await res.json();
-      const j: ScanJob = {
-        jobId,
-        status: data.job?.status ?? null,
-        progressPercent: data.job?.progress_percent ?? 0,
-        errorMessage: data.job?.error_message ?? null,
-        startedAt: data.job?.started_at ?? "",
-        completedAt: data.job?.completed_at ?? null,
-      };
+      const j = mapJob(jobId, data.job);
       setJob(j);
-
-      // Stop polling once terminal state is reached.
       if (j.status === "SUCCESS" || j.status === "FAILED") {
         stopPolling();
+        stopWorker();
       }
     } catch {
       // Ignore network errors during polling
     }
-  }, [stopPolling]);
+  }, [stopPolling, stopWorker]);
+
+  const driveBatches = useCallback(async (jobId: string, signal: AbortSignal) => {
+    while (!signal.aborted) {
+      try {
+        const res = await fetch("/api/scanner/batch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jobId }),
+        });
+
+        if (res.status === 401) break;
+
+        const data = await res.json().catch(() => ({}));
+        if (data.job) {
+          const j = mapJob(jobId, data.job);
+          setJob(j);
+          if (j.status === "SUCCESS" || j.status === "FAILED") {
+            stopPolling();
+            break;
+          }
+        }
+
+        if (!data.claimed || !data.moreRemaining) {
+          await pollJob(jobId);
+          if (!data.moreRemaining) break;
+          // Another worker holds the lease; wait and retry instead of stopping.
+          await new Promise((r) => setTimeout(r, 1500));
+          continue;
+        }
+      } catch {
+        if (signal.aborted) break;
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+    }
+  }, [pollJob, stopPolling]);
 
   const launch = useCallback(async (
-    opts: { from?: string; to?: string; concurrency?: number } = {}
+    opts: {
+      from?: string;
+      to?: string;
+      concurrency?: number;
+      symbols?: string[];
+      instrumentIds?: number[];
+    } = {}
   ) => {
     stopPolling();
+    stopWorker();
     setLaunching(true);
     try {
       const res = await fetch("/api/scanner/run", {
@@ -69,20 +128,46 @@ export function useScannerJob(): UseScannerJobReturn {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(opts),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      const jobId: string = data.jobId;
-      setJob({
-        jobId,
-        status: "PENDING",
-        progressPercent: 0,
-        errorMessage: null,
-        startedAt: new Date().toISOString(),
-        completedAt: null,
-      });
 
-      // Begin polling.
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 409 && data.jobId) {
+        const jobId: string = data.jobId;
+        setJob({
+          jobId,
+          status: "RUNNING",
+          progressPercent: 0,
+          errorMessage: "Resuming the scan already in progress.",
+          startedAt: new Date().toISOString(),
+          completedAt: null,
+          currentStage: null,
+        });
+        pollRef.current = setInterval(() => pollJob(jobId), POLL_INTERVAL_MS);
+        const controller = new AbortController();
+        workerAbort.current = controller;
+        void driveBatches(jobId, controller.signal);
+        return;
+      }
+
+      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+      const jobId: string = data.jobId;
+      setJob(
+        data.job
+          ? mapJob(jobId, data.job)
+          : {
+              jobId,
+              status: "PENDING",
+              progressPercent: 0,
+              errorMessage: null,
+              startedAt: new Date().toISOString(),
+              completedAt: null,
+              currentStage: null,
+            }
+      );
+
       pollRef.current = setInterval(() => pollJob(jobId), POLL_INTERVAL_MS);
+      const controller = new AbortController();
+      workerAbort.current = controller;
+      void driveBatches(jobId, controller.signal);
     } catch (err: any) {
       setJob((prev) =>
         prev
@@ -92,15 +177,18 @@ export function useScannerJob(): UseScannerJobReturn {
     } finally {
       setLaunching(false);
     }
-  }, [pollJob, stopPolling]);
+  }, [driveBatches, pollJob, stopPolling, stopWorker]);
 
   const reset = useCallback(() => {
     stopPolling();
+    stopWorker();
     setJob(null);
-  }, [stopPolling]);
+  }, [stopPolling, stopWorker]);
 
-  // Clean up on unmount.
-  useEffect(() => () => stopPolling(), [stopPolling]);
+  useEffect(() => () => {
+    stopPolling();
+    stopWorker();
+  }, [stopPolling, stopWorker]);
 
   return { job, launching, launch, reset };
 }

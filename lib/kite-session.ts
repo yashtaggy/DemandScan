@@ -203,3 +203,49 @@ export async function requireSession(
   if (!session) throw new Error("UNAUTHENTICATED");
   return session;
 }
+
+/**
+ * Resolve a Kite session from the stored SHA-256 cookie hash.
+ * Used by the scan worker when a cron request has no `ds_sid` cookie.
+ * Does not change encryption, cookies, or token handling.
+ */
+export async function getSessionByIdHash(
+  sessionIdHash: string
+): Promise<KiteSession | null> {
+  if (!sessionIdHash) return null;
+
+  const sql = getDb();
+  const rows = await sql`
+    SELECT
+      encrypted_access_token,
+      user_id,
+      user_name,
+      email,
+      login_time,
+      expires_at
+    FROM kite_sessions
+    WHERE session_id_hash = ${sessionIdHash}
+      AND expires_at > NOW()
+    LIMIT 1
+  `;
+
+  if (rows.length === 0) return null;
+
+  const row = rows[0];
+  let accessToken: string;
+  try {
+    accessToken = decrypt(row.encrypted_access_token as string);
+  } catch {
+    console.error("[db-session] Decryption failed for hashed session; treating as unauthenticated.");
+    return null;
+  }
+
+  return {
+    accessToken,
+    userId: row.user_id as string,
+    userName: row.user_name as string,
+    email: row.email as string,
+    loginTime: (row.login_time as Date).toISOString(),
+    expiresAt: (row.expires_at as Date).toISOString(),
+  };
+}

@@ -30,9 +30,6 @@ import { updateScanJob } from './jobs';
 import { DEFAULT_SCANNER_CONFIG } from './types';
 import type { ScannerConfig, Timeframe, Candle } from './types';
 
-/** All 8 supported timeframes in scan order */
-const SCAN_TIMEFRAMES: Timeframe[] = ['1H', '4H', '1D', '1W', '1M', '3M', '6M', '1Y'];
-
 export interface OrchestratorOptions {
   jobId: string;
   session: KiteSession;
@@ -44,9 +41,33 @@ export interface OrchestratorOptions {
   instrumentIds?: number[];
 }
 
+const SCAN_TIMEFRAMES: Timeframe[] = ['1H', '4H', '1D', '1W', '1M', '3M', '6M', '1Y'];
+
 /**
- * Run the full scan pipeline.
- * Fire-and-forget from the API route; progress reflected in scan_jobs table.
+ * Detect patterns and upsert zones for one instrument across all 8 timeframes.
+ * Preserves existing detection, scoring, and upsert behaviour.
+ */
+export async function detectAndUpsertZonesForInstrument(
+  instrumentId: number,
+  config: ScannerConfig = DEFAULT_SCANNER_CONFIG
+): Promise<void> {
+  const sql = getDb();
+  for (const tf of SCAN_TIMEFRAMES) {
+    try {
+      const matches = await detectPatternsForInstrument(instrumentId, tf, config);
+      const candles = await fetchCandlesForZoneScoring(instrumentId, tf, sql);
+      for (const match of matches) {
+        await upsertZone(match, candles, config, config.version);
+      }
+    } catch (err) {
+      console.error(`[orchestrator] pattern detection failed for ${instrumentId}/${tf}:`, err);
+    }
+  }
+}
+
+/**
+ * In-process full pipeline. Not used by serverless API routes — those run
+ * bounded batches via `processScanBatch`. Kept for local/long-running callers.
  */
 export async function runFullScan(opts: OrchestratorOptions): Promise<void> {
   const {
@@ -102,17 +123,7 @@ export async function runFullScan(opts: OrchestratorOptions): Promise<void> {
     let processed = 0;
 
     for (const id of ids) {
-      for (const tf of SCAN_TIMEFRAMES) {
-        try {
-          const matches = await detectPatternsForInstrument(id, tf, config);
-          const candles = await fetchCandlesForZoneScoring(id, tf, sql);
-          for (const match of matches) {
-            await upsertZone(match, candles, config, config.version);
-          }
-        } catch (err) {
-          console.error(`[orchestrator] pattern detection failed for ${id}/${tf}:`, err);
-        }
-      }
+      await detectAndUpsertZonesForInstrument(id, config);
 
       processed++;
       // Progress spans 55 → 90 during pattern detection

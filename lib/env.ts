@@ -68,3 +68,13 @@ export function areKiteEnvVarsSet(): boolean {
 export function isDatabaseConfigured(): boolean {
   return Boolean(process.env.DATABASE_URL?.trim());
 }
+
+/**
+ * Optional Vercel Cron secret. When set, Vercel sends
+ * `Authorization: Bearer <CRON_SECRET>` on cron invocations.
+ * Missing is allowed — the UI-authenticated worker can still process batches.
+ */
+export function getCronSecret(): string | null {
+  const value = process.env.CRON_SECRET?.trim();
+  return value ? value : null;
+}

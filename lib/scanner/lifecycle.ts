@@ -190,18 +190,35 @@ async function appendZoneEvent(
  * Build price snapshots from the latest candle in `daily_candles` per instrument.
  * Used to run a lifecycle update from the most recent data without a live feed.
  */
-export async function buildLatestSnapshots(): Promise<PriceSnapshot[]> {
+export async function buildLatestSnapshots(
+  instrumentIds?: number[]
+): Promise<PriceSnapshot[]> {
   const sql = getDb();
-  const rows = await sql`
-    SELECT DISTINCT ON (instrument_id)
-      instrument_id,
-      close,
-      high,
-      low,
-      candle_date AS date
-    FROM daily_candles
-    ORDER BY instrument_id, candle_date DESC
-  `;
+  let rows;
+  if (instrumentIds && instrumentIds.length > 0) {
+    rows = await sql`
+      SELECT DISTINCT ON (instrument_id)
+        instrument_id,
+        close,
+        high,
+        low,
+        candle_date AS date
+      FROM daily_candles
+      WHERE instrument_id = ANY(${instrumentIds}::bigint[])
+      ORDER BY instrument_id, candle_date DESC
+    `;
+  } else {
+    rows = await sql`
+      SELECT DISTINCT ON (instrument_id)
+        instrument_id,
+        close,
+        high,
+        low,
+        candle_date AS date
+      FROM daily_candles
+      ORDER BY instrument_id, candle_date DESC
+    `;
+  }
   return rows.map((r: any): PriceSnapshot => ({
     instrumentId: Number(r.instrument_id),
     close: Number(r.close),

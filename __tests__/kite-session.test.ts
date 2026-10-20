@@ -81,6 +81,7 @@ import {
   DbSessionStore,
   getSessionIdFromCookies,
   getSessionFromRequest,
+  getSessionByIdHash,
   isAuthenticated,
   requireSession,
   SESSION_COOKIE_NAME,
@@ -246,6 +247,20 @@ describe("requireSession", () => {
     await store.set("req-id", makeMockSession());
     const session = await requireSession(makeCookieHeader("req-id"));
     expect(session.userId).toBe("ZP0001");
+  });
+});
+
+describe("getSessionByIdHash", () => {
+  it("loads a live session by stored cookie hash without changing token handling", async () => {
+    const mock = makeMockSession();
+    await store.set("session-123", mock);
+    const result = await getSessionByIdHash("hash:session-123");
+    expect(result?.accessToken).toBe(mock.accessToken);
+    expect(result?.userId).toBe(mock.userId);
+  });
+
+  it("returns null for an unknown hash", async () => {
+    expect(await getSessionByIdHash("hash:missing")).toBeNull();
   });
 });
 

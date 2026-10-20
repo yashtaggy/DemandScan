@@ -57,6 +57,18 @@ export function ScanProgress({ job, launching }: ScanProgressProps) {
         <p className="text-xs text-rose-400/80 leading-relaxed">{job.errorMessage}</p>
       )}
 
+      {job?.currentStage && status === "RUNNING" && (
+        <p className="text-xs text-slate-500">Stage: {job.currentStage}</p>
+      )}
+
+      {status === "RUNNING" && (
+        <p className="text-xs text-slate-500 leading-relaxed">
+          This tab keeps the scan moving in small batches. If you close the browser,
+          work pauses until you reopen the scanner or until Vercel Cron (every minute,
+          Pro plan) continues it with <code className="text-slate-400">CRON_SECRET</code>.
+        </p>
+      )}
+
       {status === "SUCCESS" && (
         <p className="text-xs text-emerald-400/70">
           Zones updated — refresh the table below to see results.

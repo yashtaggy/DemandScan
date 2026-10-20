@@ -1,0 +1,16 @@
+{
+  "crons": [
+    {
+      "path": "/api/scanner/batch",
+      "schedule": "* * * * *"
+    }
+  ],
+  "functions": {
+    "app/api/scanner/batch/route.ts": {
+      "maxDuration": 60
+    },
+    "app/api/scanner/run/route.ts": {
+      "maxDuration": 60
+    }
+  }
+}

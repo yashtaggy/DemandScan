@@ -1,7 +1,11 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import { requireSession } from '@/lib/kite-session';
+import { getSessionIdFromCookies, requireSession } from '@/lib/kite-session';
+import { hashSessionId } from '@/lib/crypto';
 import { getScanJob } from '@/lib/scanner/jobs';
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 /**
  * GET /api/scanner/job/[jobId]
@@ -27,6 +31,12 @@ export async function GET(req: NextRequest) {
 
   const job = await getScanJob(jobId);
   if (!job) {
+    return NextResponse.json({ error: 'Job not found', code: 'JOB_NOT_FOUND' }, { status: 404 });
+  }
+
+  const sessionId = getSessionIdFromCookies(req.headers.get('cookie'));
+  const sessionIdHash = sessionId ? hashSessionId(sessionId) : null;
+  if (job.session_id_hash && sessionIdHash && job.session_id_hash !== sessionIdHash) {
     return NextResponse.json({ error: 'Job not found', code: 'JOB_NOT_FOUND' }, { status: 404 });
   }
 
