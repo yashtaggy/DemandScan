@@ -64,6 +64,9 @@ cp .env.example .env.local
 
 # Run all database migrations (one-time setup, idempotent)
 node db/migrate.js
+
+# Verify the live database matches the schema the code expects (read-only)
+node db/verify-schema.js
 ```
 
 ---
@@ -100,6 +103,14 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
    node db/migrate.js
    ```
    The script is **idempotent** — safe to run multiple times, no data is deleted.
+5. Verify the live schema matches what the code expects:
+   ```bash
+   node db/verify-schema.js
+   ```
+   This is a **read-only** check. Run it after every migration and against
+   production before deploying — a migration committed to the repo but never
+   applied to the live database causes `NeonDbError: column ... does not exist`
+   (HTTP 500) at runtime, which local tests cannot catch.
 
 ### Schema summary
 
@@ -111,7 +122,8 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 | `aggregated_candles` | Weekly/monthly aggregated candles (Phase 3) |
 | `zones` | Detected supply/demand zones with scores + lifecycle state |
 | `zone_events` | Immutable audit log of zone TOUCH / RETEST / BREAK events |
-| `scan_jobs` | Job records with status and progress percentage |
+| `scan_jobs` | Job records with status, progress, session ownership, and resumable batch checkpoints |
+| `scan_job_batches` | Per-batch checkpoint/audit rows for the browser-driven scan worker |
 | `scanner_configs` | Versioned scanner configuration snapshots |
 | `ingestion_checkpoints` | Per-instrument last-ingested date for incremental fetches |
 
@@ -344,9 +356,23 @@ https://your-domain.vercel.app/api/kite/callback
 
 ### Step 3 — Run migrations against the production DB
 
+Migrations are **not** run by the Vercel build. After pulling (or writing) a
+commit that adds a file under `db/migrations/`, apply it to the production
+database manually:
+
 ```bash
 DATABASE_URL="postgres://..." node db/migrate.js
 ```
+
+Then confirm the production schema actually has the new objects (read-only):
+
+```bash
+DATABASE_URL="postgres://..." node db/verify-schema.js
+```
+
+Until `verify-schema.js` passes, endpoints that rely on the new columns (e.g.
+`POST /api/scanner/run` needs `scan_jobs.session_id_hash`) will fail with
+HTTP 500 in production regardless of local test results.
 
 ### Step 4 — Verify build
 

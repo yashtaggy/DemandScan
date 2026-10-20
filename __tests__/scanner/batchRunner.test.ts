@@ -286,6 +286,37 @@ describe('processScanBatch', () => {
     expect(workers.ingestDaily).not.toHaveBeenCalled();
   });
 
+  test('lets a session claim and process its own job (ownership by session_id_hash)', async () => {
+    const store = new MemoryStore(makeJob({ session_id_hash: 'hash:sid' }));
+    const workers = makeWorkers();
+    const result = await processScanBatch(
+      { jobId: 'job-1', sessionIdHash: 'hash:sid', session },
+      store,
+      workers
+    );
+    expect(result.claimed).toBe(true);
+    expect(result.status).toBe('RUNNING');
+    expect(workers.ingestDaily).toHaveBeenCalled();
+    // Batch persisted → lease released, checkpoint advanced to the next stage.
+    expect(store.jobs.get('job-1')?.lease_owner).toBeNull();
+    expect(store.jobs.get('job-1')?.current_stage).toBe('INGEST_HOURLY');
+  });
+
+  test('lets any authenticated session claim a legacy job with no owner', async () => {
+    // Jobs created by the older ingest flow have session_id_hash = NULL and
+    // must remain resumable instead of orphaned.
+    const store = new MemoryStore(makeJob({ session_id_hash: null }));
+    const workers = makeWorkers();
+    const result = await processScanBatch(
+      { jobId: 'job-1', sessionIdHash: 'hash:sid', session },
+      store,
+      workers
+    );
+    expect(result.claimed).toBe(true);
+    expect(result.status).toBe('RUNNING');
+    expect(workers.ingestDaily).toHaveBeenCalled();
+  });
+
   test('allows another worker to resume after the lease is released', async () => {
     const store = new MemoryStore(makeJob({ current_stage: 'AGGREGATE_DAILY' }));
     const workers = makeWorkers();
