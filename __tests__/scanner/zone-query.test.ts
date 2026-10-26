@@ -2,6 +2,7 @@ import {
   parseZoneQuery,
   buildZoneWhere,
   DEFAULT_ZONE_LIMIT,
+  DEFAULT_MIN_FORMATION_SCORE,
   MAX_ZONE_LIMIT,
   ZONE_SORT_COLUMNS,
 } from '@/lib/scanner/zone-query';
@@ -27,15 +28,22 @@ describe('parseZoneQuery defaults', () => {
     const q = expectOk('');
     expect(q.limit).toBe(DEFAULT_ZONE_LIMIT);
     expect(q.offset).toBe(0);
-    expect(q.sort).toBe('composite_score');
+    expect(q.sort).toBe('score');
     expect(q.dir).toBe('DESC');
-    expect(q.sortColumn).toBe('z.composite_score');
+    expect(q.sortColumn).toBe('z.score');
     expect(q.symbol).toBeNull();
     expect(q.timeframe).toBeNull();
     expect(q.side).toBeNull();
     expect(q.pattern).toBeNull();
     expect(q.lifecycle).toBeNull();
     expect(q.instrumentId).toBeNull();
+    expect(q.minScore).toBe(DEFAULT_MIN_FORMATION_SCORE);
+  });
+
+  it('lets an explicit minScore=0 override the default Formation Score floor', () => {
+    const q = expectOk('minScore=0');
+    expect(q.minScore).toBe(0);
+    expect(buildZoneWhere(q).params).toEqual([0]);
   });
 
   it('accepts a fully populated valid query', () => {
@@ -141,15 +149,15 @@ describe('parseZoneQuery distinction between blank and invalid', () => {
     expect(q.side).toBeNull();
     expect(q.limit).toBe(DEFAULT_ZONE_LIMIT);
     expect(q.offset).toBe(0);
-    expect(q.minScore).toBeNull();
+    expect(q.minScore).toBe(DEFAULT_MIN_FORMATION_SCORE);
   });
 });
 
 describe('buildZoneWhere', () => {
-  it('emits no WHERE clause when no filters are set', () => {
+  it('emits the default Formation Score floor when no filters are set', () => {
     const where = buildZoneWhere(expectOk(''));
-    expect(where.clause).toBe('');
-    expect(where.params).toEqual([]);
+    expect(where.clause).toBe('WHERE z.score >= $1');
+    expect(where.params).toEqual([DEFAULT_MIN_FORMATION_SCORE]);
   });
 
   it('emits only provided filters, in bind order, as $n parameters', () => {

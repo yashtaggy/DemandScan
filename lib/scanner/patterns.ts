@@ -287,6 +287,129 @@ export async function fetchCandlesForTimeframe(
 }
 
 /**
+ * Fetch the newest `limit` candles for several timeframes in one round trip.
+ *
+ * Detection previously issued one query per timeframe (8 per instrument).
+ * Each branch below applies the same newest-window rule as
+ * `fetchCandlesForTimeframe`; the union is ordered by timeframe and timestamp
+ * so callers receive ascending candles per timeframe.
+ */
+interface CandleRow {
+  timeframe: Timeframe;
+  instrument_token: number | string;
+  period_start: string | number | Date;
+  open: number | string;
+  high: number | string;
+  low: number | string;
+  close: number | string;
+  volume: number | string;
+}
+
+export async function fetchCandlesForAllTimeframes(
+  instrumentId: number,
+  timeframes: readonly Timeframe[],
+  limit = 500
+): Promise<Map<Timeframe, Candle[]>> {
+  const result = new Map<Timeframe, Candle[]>();
+  for (const tf of timeframes) result.set(tf, []);
+  if (timeframes.length === 0) return result;
+
+  const sql = getDb();
+  const params: unknown[] = [instrumentId, limit];
+  const branches: string[] = [];
+
+  for (const tf of timeframes) {
+    switch (tf) {
+      case '1H':
+        branches.push(`
+          SELECT '1H'::text AS timeframe, instrument_token, period_start,
+                 open, high, low, close, volume
+          FROM (
+            SELECT instrument_id AS instrument_token, candle_ts AS period_start,
+                   open, high, low, close, volume
+            FROM hourly_candles
+            WHERE instrument_id = $1 AND is_session_complete = TRUE
+            ORDER BY candle_ts DESC
+            LIMIT $2
+          ) recent`);
+        break;
+      case '4H':
+        branches.push(`
+          SELECT '4H'::text AS timeframe, instrument_token, period_start,
+                 open, high, low, close, volume
+          FROM (
+            SELECT instrument_id AS instrument_token, session_ts AS period_start,
+                   open, high, low, close, volume
+            FROM four_hour_candles
+            WHERE instrument_id = $1 AND is_complete = TRUE
+            ORDER BY session_ts DESC
+            LIMIT $2
+          ) recent`);
+        break;
+      case '1D':
+        // DATE columns are pinned to UTC midnight so detection is independent
+        // of the DB session/Node timezone. The inner ORDER BY stays on the raw
+        // column so the DESC LIMIT keeps using the index.
+        branches.push(`
+          SELECT '1D'::text AS timeframe, instrument_token,
+                 (period_start::timestamp AT TIME ZONE 'UTC') AS period_start,
+                 open, high, low, close, volume
+          FROM (
+            SELECT instrument_id AS instrument_token, candle_date AS period_start,
+                   open, high, low, close, volume
+            FROM daily_candles
+            WHERE instrument_id = $1
+            ORDER BY candle_date DESC
+            LIMIT $2
+          ) recent`);
+        break;
+      default: {
+        const tfParam = params.push(tf);
+        branches.push(`
+          SELECT $${tfParam}::text AS timeframe, instrument_token,
+                 (period_start::timestamp AT TIME ZONE 'UTC') AS period_start,
+                 open, high, low, close, volume
+          FROM (
+            SELECT instrument_token, period_start,
+                   open, high, low, close, volume
+            FROM aggregated_candles
+            WHERE instrument_token = $1
+              AND timeframe = $${tfParam}
+            ORDER BY period_start DESC
+            LIMIT $2
+          ) recent`);
+        break;
+      }
+    }
+  }
+
+  const rows = await sql.query(
+    `SELECT timeframe, instrument_token, period_start, open, high, low, close, volume
+     FROM (${branches.join('\nUNION ALL\n')}) candles
+     ORDER BY timeframe, period_start ASC`,
+    params
+  );
+
+  for (const r of rows as CandleRow[]) {
+    const bucket = result.get(r.timeframe);
+    if (!bucket) continue;
+    bucket.push({
+      instrumentId: Number(r.instrument_token),
+      date: new Date(r.period_start),
+      open: Number(r.open),
+      high: Number(r.high),
+      low: Number(r.low),
+      close: Number(r.close),
+      volume: Number(r.volume),
+      source: 'db',
+      isComplete: true,
+    });
+  }
+
+  return result;
+}
+
+/**
  * Fetch candles from DB for an instrument + timeframe and return all detected
  * pattern matches. Handles all eight supported timeframes:
  *

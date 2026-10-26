@@ -2,12 +2,14 @@
 
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
-import type { Timeframe, ZoneSide } from "@/lib/scanner/types";
-import type { ZoneFilters } from "@/hooks/use-zones";
+import type { Pattern, Timeframe, ZoneSide } from "@/lib/scanner/types";
+import { DEFAULT_SCANNER_FILTERS, type ZoneFilters } from "@/hooks/use-zones";
 
 interface ScannerControlsProps {
   filters: ZoneFilters;
   onFiltersChange: (f: ZoneFilters) => void;
+  /** Restores every filter and sort control to its default. Never starts a scan. */
+  onResetFilters: () => void;
   onRunScan: () => void;
   onRefreshZones: () => void;
   isRunning: boolean;
@@ -23,6 +25,7 @@ const TF_LABELS: Record<string, string> = {
 };
 
 const SIDES: Array<ZoneSide | "ALL"> = ["ALL", "DEMAND", "SUPPLY"];
+const PATTERNS: Array<Pattern | "ALL"> = ["ALL", "DBR", "RBR", "RBD", "DBD"];
 const LIFECYCLES = ["ALL", "CONFIRMED_FRESH", "TOUCHED_ONCE", "RETESTED", "BROKEN"] as const;
 const LIFECYCLE_LABELS: Record<string, string> = {
   ALL: "All", CONFIRMED_FRESH: "Fresh", TOUCHED_ONCE: "Tested", RETESTED: "Retested", BROKEN: "Broken",
@@ -36,7 +39,7 @@ const SORT_OPTIONS: Array<{ value: NonNullable<ZoneFilters["sort"]>; label: stri
 ];
 
 export function ScannerControls({
-  filters, onFiltersChange, onRunScan, onRefreshZones,
+  filters, onFiltersChange, onResetFilters, onRunScan, onRefreshZones,
   isRunning, launching, isAuthenticated, runSymbol,
 }: ScannerControlsProps) {
   const busy = isRunning || launching;
@@ -48,7 +51,11 @@ export function ScannerControls({
 
   const activeTf        = filters.timeframe ?? "ALL";
   const activeSide      = filters.side      ?? "ALL";
+  const activePattern   = filters.pattern   ?? "ALL";
   const activeLifecycle = filters.lifecycle ?? "ALL";
+  const minScore        = filters.minScore ?? DEFAULT_SCANNER_FILTERS.minScore ?? 0;
+  const sortValue       = filters.sort ?? DEFAULT_SCANNER_FILTERS.sort;
+  const dirValue        = filters.dir ?? DEFAULT_SCANNER_FILTERS.dir;
 
   return (
     <div className="space-y-4">
@@ -79,6 +86,19 @@ export function ScannerControls({
             <polyline points="23 4 23 10 17 10" /><polyline points="1 20 1 14 7 14" />
             <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15" />
           </svg>
+        </button>
+      </div>
+
+      {/* ── Filters header / reset ─────────────────────────────────────── */}
+      <div className="flex items-center justify-between border-t border-slate-700/40 pt-3">
+        <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Filters</p>
+        <button
+          id="reset-filters-btn"
+          type="button"
+          onClick={onResetFilters}
+          className="px-2.5 py-1 text-xs rounded-md border border-slate-600/60 bg-slate-800/40 text-slate-300 hover:bg-slate-700/50 hover:text-slate-100 transition-colors"
+        >
+          Reset filters
         </button>
       </div>
 
@@ -130,6 +150,19 @@ export function ScannerControls({
         </div>
       </FilterGroup>
 
+      {/* ── Pattern ───────────────────────────────────────────────────── */}
+      <FilterGroup label="Pattern">
+        <div className="flex flex-wrap gap-1">
+          {PATTERNS.map((p) => (
+            <FilterChip key={p} id={`pattern-${p}`} active={activePattern === p}
+              onClick={() => set({ pattern: p === "ALL" ? undefined : p })}
+            >
+              {p === "ALL" ? "All" : p}
+            </FilterChip>
+          ))}
+        </div>
+      </FilterGroup>
+
       {/* ── Lifecycle ─────────────────────────────────────────────────── */}
       <FilterGroup label="Zone Status">
         <div className="flex flex-wrap gap-1">
@@ -144,10 +177,10 @@ export function ScannerControls({
       </FilterGroup>
 
       {/* ── Formation score ────────────────────────────────────────────── */}
-      <FilterGroup label={`Formation Score ≥ ${filters.minScore ?? 0}`}>
+      <FilterGroup label={`Formation Score ≥ ${minScore}`}>
         <input id="min-score-slider" type="range" min={0} max={100} step={5}
-          value={filters.minScore ?? 0}
-          onChange={(e) => set({ minScore: Number(e.target.value) || undefined })}
+          value={minScore}
+          onChange={(e) => set({ minScore: Number(e.target.value) })}
           className="w-full h-1.5 rounded-full accent-indigo-500 cursor-pointer"
         />
         <div className="flex justify-between text-xs text-slate-600 mt-0.5">
@@ -171,15 +204,15 @@ export function ScannerControls({
       <FilterGroup label="Sort By">
         <select
           id="sort-select"
-          value={filters.sort ?? "composite_score"}
+          value={sortValue}
           onChange={(e) => set({ sort: e.target.value as ZoneFilters["sort"] })}
           className="w-full rounded-md border border-slate-700/50 bg-slate-800/60 px-2 py-1.5 text-xs text-slate-300 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
         >
           {SORT_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
         </select>
         <div className="flex gap-1 mt-1.5">
-          <FilterChip id="dir-desc" active={(filters.dir ?? "desc") === "desc"} onClick={() => set({ dir: "desc" })}>↓ Desc</FilterChip>
-          <FilterChip id="dir-asc"  active={filters.dir === "asc"}              onClick={() => set({ dir: "asc" })}>↑ Asc</FilterChip>
+          <FilterChip id="dir-desc" active={dirValue === "desc"} onClick={() => set({ dir: "desc" })}>↓ Desc</FilterChip>
+          <FilterChip id="dir-asc"  active={dirValue === "asc"}  onClick={() => set({ dir: "asc" })}>↑ Asc</FilterChip>
         </div>
       </FilterGroup>
 

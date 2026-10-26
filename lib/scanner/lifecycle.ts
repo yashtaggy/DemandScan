@@ -18,6 +18,7 @@
  */
 
 import { getDb } from '@/lib/db';
+import { bulkUpsert } from './bulk';
 import type { Zone, ScannerConfig } from './types';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -100,6 +101,9 @@ export async function updateZoneLifecycles(
       AND instrument_id = ANY(${instrumentIds}::bigint[])
   `;
 
+  const updates: LifecycleUpdate[] = [];
+  const events: ZoneEventInsert[] = [];
+
   for (const row of activeZoneRows) {
     const snapshot = snapshotMap.get(Number(row.instrument_id));
     if (!snapshot) continue;
@@ -128,17 +132,19 @@ export async function updateZoneLifecycles(
 
     // Check BREAK first (takes priority).
     if (isBroken(snapshot, zone)) {
-      await sql`
-        UPDATE zones
-        SET lifecycle_state = 'BROKEN',
-            last_touch_ts   = ${snapshot.date},
-            touch_count     = touch_count + 1
-        WHERE zone_id = ${zone.zoneId}
-      `;
-      await appendZoneEvent(zone.zoneId, 'BREAK', snapshot.date, {
-        close: snapshot.close,
-        distal: zone.distal,
-      }, isHistorical);
+      const touchCount = zone.touchCount + 1;
+      updates.push({
+        zoneId: zone.zoneId,
+        state: 'BROKEN',
+        lastTouchTs: snapshot.date,
+        touchCount,
+      });
+      events.push({
+        zoneId: zone.zoneId,
+        eventType: 'BREAK',
+        candleTs: snapshot.date,
+        details: { close: snapshot.close, distal: zone.distal },
+      });
       continue;
     }
 
@@ -152,43 +158,103 @@ export async function updateZoneLifecycles(
           : 'RETESTED';
       const eventType: ZoneEventType = currentTouches === 0 ? 'TOUCH' : 'RETEST';
 
-      await sql`
-        UPDATE zones
-        SET lifecycle_state = ${newState},
-            last_touch_ts   = ${snapshot.date},
-            touch_count     = ${newTouches}
-        WHERE zone_id = ${zone.zoneId}
-      `;
-      await appendZoneEvent(zone.zoneId, eventType, snapshot.date, {
-        close: snapshot.close,
-        proximal: zone.proximal,
+      updates.push({
+        zoneId: zone.zoneId,
+        state: newState,
+        lastTouchTs: snapshot.date,
         touchCount: newTouches,
-      }, isHistorical);
+      });
+      events.push({
+        zoneId: zone.zoneId,
+        eventType,
+        candleTs: snapshot.date,
+        details: {
+          close: snapshot.close,
+          proximal: zone.proximal,
+          touchCount: newTouches,
+        },
+      });
     }
+  }
+
+  // One multi-row UPDATE and one chunked INSERT replace two round trips per
+  // changed zone. Values are identical to the previous per-zone statements.
+  await applyLifecycleUpdates(updates);
+  await insertZoneEvents(events, isHistorical);
+}
+
+interface LifecycleUpdate {
+  zoneId: string;
+  state: 'BROKEN' | 'TOUCHED_ONCE' | 'RETESTED';
+  lastTouchTs: Date;
+  touchCount: number;
+}
+
+interface ZoneEventInsert {
+  zoneId: string;
+  eventType: ZoneEventType;
+  candleTs: Date;
+  details: Record<string, unknown>;
+}
+
+const LIFECYCLE_WRITE_CHUNK = 500;
+
+async function applyLifecycleUpdates(updates: LifecycleUpdate[]): Promise<void> {
+  if (updates.length === 0) return;
+  const sql = getDb();
+
+  for (let start = 0; start < updates.length; start += LIFECYCLE_WRITE_CHUNK) {
+    const chunk = updates.slice(start, start + LIFECYCLE_WRITE_CHUNK);
+    const params: unknown[] = [];
+    const tuples = chunk.map((u) => {
+      const base = params.length;
+      params.push(u.zoneId, u.state, u.lastTouchTs, u.touchCount);
+      return `($${base + 1}::uuid, $${base + 2}::text, $${base + 3}::timestamptz, $${base + 4}::int)`;
+    });
+
+    await sql.query(
+      `UPDATE zones AS z
+       SET lifecycle_state = v.lifecycle_state,
+           last_touch_ts   = v.last_touch_ts,
+           touch_count     = v.touch_count
+       FROM (VALUES ${tuples.join(', ')})
+            AS v(zone_id, lifecycle_state, last_touch_ts, touch_count)
+       WHERE z.zone_id = v.zone_id`,
+      params
+    );
   }
 }
 
 /**
- * Append an immutable event to `zone_events`.
- * If isHistorical is true, the event is flagged as a historical replay record.
+ * Append immutable events to `zone_events`. If isHistorical is true, events
+ * are flagged as historical replay records.
  */
-async function appendZoneEvent(
-  zoneId: string,
-  eventType: ZoneEventType,
-  candleTs: Date,
-  details: Record<string, unknown>,
-  isHistorical = false
+async function insertZoneEvents(
+  events: ZoneEventInsert[],
+  isHistorical: boolean
 ): Promise<void> {
-  const sql = getDb();
-  await sql`
-    INSERT INTO zone_events (zone_id, event_type, candle_ts, details_json, is_historical, as_of_date)
-    VALUES (
-      ${zoneId}, ${eventType}, ${candleTs},
-      ${JSON.stringify(details)}::jsonb,
-      ${isHistorical},
-      ${isHistorical ? candleTs : null}::date
-    )
-  `;
+  if (events.length === 0) return;
+
+  await bulkUpsert({
+    table: 'zone_events',
+    columns: [
+      'zone_id',
+      'event_type',
+      'candle_ts',
+      'details_json',
+      'is_historical',
+      'as_of_date',
+    ],
+    rows: events.map((e) => [
+      e.zoneId,
+      e.eventType,
+      e.candleTs,
+      JSON.stringify(e.details),
+      isHistorical,
+      isHistorical ? e.candleTs : null,
+    ]),
+    conflictClause: 'ON CONFLICT DO NOTHING',
+  });
 }
 
 // ─── Latest-price snapshot helper ────────────────────────────────────────────

@@ -14,6 +14,7 @@
  */
 
 import { getDb } from '@/lib/db';
+import { bulkUpsert } from './bulk';
 import type {
   PatternMatch,
   Candle,
@@ -90,6 +91,92 @@ export function scoreZone(
 
 // ─── Zone persistence ────────────────────────────────────────────────────────
 
+export const ZONE_INSERT_COLUMNS = [
+  'instrument_id',
+  'timeframe',
+  'pattern',
+  'side',
+  'base_start',
+  'base_end',
+  'leg_in_ts',
+  'leg_out_ts',
+  'zone_low',
+  'zone_high',
+  'proximal',
+  'distal',
+  'formation_ts',
+  'config_version',
+  'score',
+  'lifecycle_state',
+  'touch_count',
+];
+
+interface PreparedZone {
+  identity: string;
+  baseStart: Date;
+  baseEnd: Date;
+  values: unknown[];
+}
+
+/** Zone identity is the same key the per-zone existence check used. */
+function zoneIdentity(
+  instrumentId: number,
+  timeframe: string,
+  pattern: string,
+  baseStart: Date,
+  baseEnd: Date
+): string {
+  return `${instrumentId}|${timeframe}|${pattern}|${baseStart.getTime()}|${baseEnd.getTime()}`;
+}
+
+function prepareZone(
+  match: PatternMatch,
+  candles: Candle[],
+  cfg: ScannerConfig,
+  configVersion: number
+): PreparedZone {
+  const legIn = candles[match.legInIndex];
+  const baseStart = candles[match.baseStartIndex];
+  const baseEnd = candles[match.baseEndIndex];
+  const legOut = candles[match.legOutIndex];
+
+  // Proximal and distal depend on zone side.
+  const proximal = match.side === 'DEMAND' ? match.zoneHigh : match.zoneLow;
+  const distal = match.side === 'DEMAND' ? match.zoneLow : match.zoneHigh;
+  const score = scoreZone(match, candles, cfg, true /* fresh */);
+
+  return {
+    identity: zoneIdentity(
+      match.instrumentId,
+      match.timeframe,
+      match.pattern,
+      baseStart.date,
+      baseEnd.date
+    ),
+    baseStart: baseStart.date,
+    baseEnd: baseEnd.date,
+    values: [
+      match.instrumentId,
+      match.timeframe,
+      match.pattern,
+      match.side,
+      baseStart.date,
+      baseEnd.date,
+      legIn.date,
+      legOut.date,
+      match.zoneLow,
+      match.zoneHigh,
+      proximal,
+      distal,
+      legOut.date,
+      configVersion,
+      score,
+      'CONFIRMED_FRESH',
+      0,
+    ],
+  };
+}
+
 /**
  * Persist a detected pattern match as a zone in the `zones` table.
  * Returns the new zone_id (UUID).
@@ -105,19 +192,7 @@ export async function upsertZone(
   configVersion: number
 ): Promise<string> {
   const sql = getDb();
-
-  const legIn = candles[match.legInIndex];
-  const baseStart = candles[match.baseStartIndex];
-  const baseEnd = candles[match.baseEndIndex];
-  const legOut = candles[match.legOutIndex];
-
-  // Proximal and distal depend on zone side.
-  const proximal =
-    match.side === 'DEMAND' ? match.zoneHigh : match.zoneLow;
-  const distal =
-    match.side === 'DEMAND' ? match.zoneLow : match.zoneHigh;
-
-  const score = scoreZone(match, candles, cfg, true /* fresh */);
+  const zone = prepareZone(match, candles, cfg, configVersion);
 
   // Check for existing zone (idempotent).
   const existing = await sql`
@@ -125,47 +200,91 @@ export async function upsertZone(
     WHERE instrument_id = ${match.instrumentId}
       AND timeframe      = ${match.timeframe}
       AND pattern        = ${match.pattern}
-      AND base_start     = ${baseStart.date}
-      AND base_end       = ${baseEnd.date}
+      AND base_start     = ${zone.baseStart}
+      AND base_end       = ${zone.baseEnd}
     LIMIT 1
   `;
   if (existing.length > 0) return existing[0].zone_id as string;
 
-  const result = await sql`
-    INSERT INTO zones (
-      instrument_id, timeframe, pattern, side,
-      base_start, base_end,
-      leg_in_ts, leg_out_ts,
-      zone_low, zone_high,
-      proximal, distal,
-      formation_ts,
-      config_version,
-      score,
-      lifecycle_state,
-      touch_count
-    ) VALUES (
-      ${match.instrumentId},
-      ${match.timeframe},
-      ${match.pattern},
-      ${match.side},
-      ${baseStart.date},
-      ${baseEnd.date},
-      ${legIn.date},
-      ${legOut.date},
-      ${match.zoneLow},
-      ${match.zoneHigh},
-      ${proximal},
-      ${distal},
-      ${legOut.date},
-      ${configVersion},
-      ${score},
-      'CONFIRMED_FRESH',
-      0
-    )
-    RETURNING zone_id
-  `;
+  const placeholders = zone.values.map((_, i) => `$${i + 1}`).join(', ');
+  const result = await sql.query(
+    `INSERT INTO zones (${ZONE_INSERT_COLUMNS.join(', ')})
+     VALUES (${placeholders})
+     RETURNING zone_id`,
+    zone.values
+  );
 
   return result[0].zone_id as string;
+}
+
+export interface DetectedZoneInput {
+  match: PatternMatch;
+  candles: Candle[];
+}
+
+interface ExistingZoneIdentityRow {
+  instrument_id: number | string;
+  timeframe: string;
+  pattern: string;
+  base_start: string | number | Date;
+  base_end: string | number | Date;
+}
+
+/**
+ * Persist all zones detected for an instrument in two round trips: one read of
+ * existing identities, then one chunked multi-row insert.
+ *
+ * Idempotence is preserved with the same identity key as `upsertZone`
+ * (instrument, timeframe, pattern, base_start, base_end). Duplicate matches
+ * within the same batch are also collapsed before insert.
+ */
+export async function persistDetectedZones(
+  inputs: DetectedZoneInput[],
+  cfg: ScannerConfig,
+  configVersion: number
+): Promise<{ inserted: number; skipped: number }> {
+  if (inputs.length === 0) return { inserted: 0, skipped: 0 };
+
+  const sql = getDb();
+  const instrumentIds = [...new Set(inputs.map((i) => i.match.instrumentId))];
+
+  const existingRows = await sql`
+    SELECT instrument_id, timeframe, pattern, base_start, base_end
+    FROM zones
+    WHERE instrument_id = ANY(${instrumentIds}::bigint[])
+  `;
+  const existing = new Set(
+    (existingRows as ExistingZoneIdentityRow[]).map((r) =>
+      zoneIdentity(
+        Number(r.instrument_id),
+        r.timeframe,
+        r.pattern,
+        new Date(r.base_start),
+        new Date(r.base_end)
+      )
+    )
+  );
+
+  const seen = new Set<string>();
+  const rows: unknown[][] = [];
+  for (const input of inputs) {
+    const zone = prepareZone(input.match, input.candles, cfg, configVersion);
+    if (existing.has(zone.identity) || seen.has(zone.identity)) continue;
+    seen.add(zone.identity);
+    rows.push(zone.values);
+  }
+
+  if (rows.length > 0) {
+    await bulkUpsert({
+      table: 'zones',
+      columns: ZONE_INSERT_COLUMNS,
+      rows,
+      conflictClause: 'ON CONFLICT DO NOTHING',
+      chunkSize: 200,
+    });
+  }
+
+  return { inserted: rows.length, skipped: inputs.length - rows.length };
 }
 
 // ─── Zone retrieval ──────────────────────────────────────────────────────────

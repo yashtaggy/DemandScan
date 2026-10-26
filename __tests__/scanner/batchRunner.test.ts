@@ -105,8 +105,8 @@ class MemoryStore implements ScanJobStore {
   persist: ScanJobStore['persist'] = async (opts) => {
     this.persistCalls.push(opts);
     const job = this.jobs.get(opts.jobId);
-    if (!job) return;
-    this.jobs.set(opts.jobId, {
+    if (!job) return null;
+    const updated: ScanJobRow = {
       ...job,
       status: opts.status,
       current_stage: opts.stage,
@@ -120,7 +120,9 @@ class MemoryStore implements ScanJobStore {
       completed_at: opts.completedAt ?? null,
       lease_owner: null,
       lease_expires_at: null,
-    });
+    };
+    this.jobs.set(opts.jobId, updated);
+    return updated;
   };
 
   getJob: ScanJobStore['getJob'] = async (jobId) => this.jobs.get(jobId) ?? null;
@@ -226,14 +228,19 @@ describe('processScanBatch', () => {
 
     expect(result.claimed).toBe(true);
     expect(result.status).toBe('RUNNING');
-    expect(workers.ingestDaily).toHaveBeenCalledTimes(3);
+    expect(workers.ingestDaily).toHaveBeenCalledTimes(5);
     expect(store.batches[0].status).toBe('SUCCESS');
     expect(store.persistCalls).toHaveLength(1);
-    expect(store.persistCalls[0].cursorInstrumentId).toBe(103);
-    expect(store.persistCalls[0].progressPercent).toBeGreaterThan(0);
-    expect(store.jobs.get('job-1')?.current_stage).toBe('INGEST_DAILY');
-    expect(store.jobs.get('job-1')?.cursor_instrument_id).toBe(103);
+    // All 5 instruments fit in the new daily batch, so the stage advances.
+    expect(store.persistCalls[0].cursorInstrumentId).toBe(0);
+    expect(store.persistCalls[0].progressPercent).toBe(20);
+    expect(store.jobs.get('job-1')?.current_stage).toBe('INGEST_HOURLY');
+    expect(store.jobs.get('job-1')?.cursor_instrument_id).toBe(0);
     expect(store.jobs.get('job-1')?.status).toBe('RUNNING');
+    expect(result.job).toMatchObject({
+      current_stage: 'INGEST_HOURLY',
+      status: 'RUNNING',
+    });
   });
 
   test('does not advance the checkpoint when a batch throws', async () => {

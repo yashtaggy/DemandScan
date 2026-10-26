@@ -17,7 +17,7 @@ import { parseZoneQuery, buildZoneWhere } from '@/lib/scanner/zone-query';
  *   side              DEMAND|SUPPLY
  *   pattern           DBR|RBR|RBD|DBD
  *   lifecycle         CONFIRMED_FRESH|TOUCHED_ONCE|RETESTED|BROKEN
- *   minScore          0–100
+ *   minScore          0–100 (default 50; send 0 for all formation scores)
  *   minCompositeScore 0–100
  *   maxDistancePct    0–100
  *   minConfluence     0–100
@@ -27,6 +27,7 @@ import { parseZoneQuery, buildZoneWhere } from '@/lib/scanner/zone-query';
  *   limit             1–500 (default 100)
  *   offset            >= 0 (default 0)
  *   sort              score|composite_score|formation_ts|distance_pct
+ *                     (default score, descending)
  *   dir               asc|desc
  *
  * Returns: { zones, count, limit, offset, hasMore }.
@@ -65,7 +66,7 @@ export async function GET(req: NextRequest) {
     FROM zones z
     JOIN instruments i ON i.instrument_id = z.instrument_id
     ${where.clause}
-    ORDER BY ${q.sortColumn} ${q.dir} NULLS LAST
+    ORDER BY ${q.sortColumn} ${q.dir} NULLS LAST, z.zone_id ASC
     LIMIT $${where.params.length + 1}
     OFFSET $${where.params.length + 2}`,
     [...where.params, q.limit, q.offset]

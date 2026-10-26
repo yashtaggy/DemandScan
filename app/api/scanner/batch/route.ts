@@ -46,7 +46,8 @@ export async function POST(req: NextRequest) {
     session,
   });
 
-  const job = result.jobId ? await getScanJob(result.jobId) : null;
+  // Avoid a re-read: the persist step returns the updated row.
+  const job = result.job ?? (result.jobId ? await getScanJob(result.jobId) : null);
 
   return NextResponse.json({
     claimed: result.claimed,

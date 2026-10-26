@@ -478,14 +478,16 @@ export async function persistScanJobCheckpoint(opts: {
   instrumentIds?: number[] | null;
   errorMessage?: string | null;
   completedAt?: Date | null;
-}): Promise<void> {
+}): Promise<ScanJobRow | null> {
   const sql = getDb();
   const idsJson =
     opts.instrumentIds == null ? null : JSON.stringify(opts.instrumentIds);
   const completedAt = opts.completedAt ?? null;
   const errorMessage = opts.errorMessage ?? null;
 
-  await sql`
+  // RETURNING avoids a second round trip in the batch route just to re-read
+  // the row that was just written.
+  const rows = await sql`
     UPDATE scan_jobs SET
       status = ${opts.status},
       current_stage = ${opts.stage},
@@ -500,7 +502,9 @@ export async function persistScanJobCheckpoint(opts: {
       lease_owner = NULL,
       lease_expires_at = NULL
     WHERE job_id = ${opts.jobId}
+    RETURNING *
   `;
+  return rows.length ? mapScanJobRow(rows[0]) : null;
 }
 
 /**

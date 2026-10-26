@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Header } from "@/components/header";
 import { useAuth } from "@/hooks/use-auth";
-import { useZones, type ZoneFilters } from "@/hooks/use-zones";
+import { useZones, DEFAULT_SCANNER_FILTERS, type ZoneFilters } from "@/hooks/use-zones";
 import { useScannerJob } from "@/hooks/use-scanner-job";
 import { ScanProgress } from "@/components/scanner/ScanProgress";
 import { ScannerControls } from "@/components/scanner/ScannerControls";
@@ -20,7 +20,10 @@ export default function ScannerPage() {
   const isAuthenticated = authStatus?.authenticated ?? false;
 
   // ── Filter / pagination state ────────────────────────────────────────────
-  const [filters, setFilters] = useState<ZoneFilters>({ limit: PAGE_SIZE });
+  const [filters, setFilters] = useState<ZoneFilters>({
+    ...DEFAULT_SCANNER_FILTERS,
+    limit: PAGE_SIZE,
+  });
   const [page, setPage] = useState(1);
 
   const activeFilters: ZoneFilters = {
@@ -54,6 +57,13 @@ export default function ScannerPage() {
 
   function handleFiltersChange(f: ZoneFilters) {
     setFilters(f);
+    setPage(1);
+  }
+
+  // Restores every user-adjustable filter to its default. This only changes
+  // list-query state; it never starts, resumes, or cancels a scan.
+  function handleResetFilters() {
+    setFilters({ ...DEFAULT_SCANNER_FILTERS, limit: PAGE_SIZE });
     setPage(1);
   }
 
@@ -163,6 +173,7 @@ export default function ScannerPage() {
                 <ScannerControls
                   filters={filters}
                   onFiltersChange={handleFiltersChange}
+                  onResetFilters={handleResetFilters}
                   onRunScan={() => launch(filters.symbol ? { symbols: [filters.symbol] } : {})}
                   onRefreshZones={refetch}
                   isRunning={isRunning}

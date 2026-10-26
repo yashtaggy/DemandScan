@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { useZones, type ZoneFilters } from "@/hooks/use-zones";
+import { useZones, DEFAULT_SCANNER_FILTERS, type ZoneFilters } from "@/hooks/use-zones";
 import { useScannerJob } from "@/hooks/use-scanner-job";
 import { ScanProgress } from "@/components/scanner/ScanProgress";
 import { ScannerControls } from "@/components/scanner/ScannerControls";
@@ -13,7 +13,10 @@ interface ScannerPanelProps {
 }
 
 export function ScannerPanel({ isAuthenticated }: ScannerPanelProps) {
-  const [filters, setFilters] = useState<ZoneFilters>({ limit: 50 });
+  const [filters, setFilters] = useState<ZoneFilters>({
+    ...DEFAULT_SCANNER_FILTERS,
+    limit: 50,
+  });
   const { zones, count, loading, error, refetch } = useZones(
     isAuthenticated ? filters : {}
   );
@@ -49,6 +52,7 @@ export function ScannerPanel({ isAuthenticated }: ScannerPanelProps) {
           <ScannerControls
             filters={filters}
             onFiltersChange={setFilters}
+            onResetFilters={() => setFilters({ ...DEFAULT_SCANNER_FILTERS, limit: 50 })}
             onRunScan={() => launch(filters.symbol ? { symbols: [filters.symbol] } : {})}
             onRefreshZones={refetch}
             isRunning={isRunning}

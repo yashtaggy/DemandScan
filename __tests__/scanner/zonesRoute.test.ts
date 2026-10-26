@@ -89,13 +89,33 @@ describe('GET /api/scanner/zones', () => {
     expect(body.hasMore).toBe(true);
 
     const [rowsSql, rowsParams] = firstSql();
-    const [countSql, countParams] = secondSql();
-    expect(rowsSql).toContain('LIMIT $1');
-    expect(rowsSql).toContain('OFFSET $2');
-    expect(rowsParams).toEqual([100, 0]);
-    expect(countSql).toContain('COUNT(*)');
-    expect(countSql).not.toContain('LIMIT');
-    expect(countParams).toEqual([]);
+    const [, countParams] = secondSql();
+    expect(rowsSql).toContain('WHERE z.score >= $1');
+    expect(rowsSql).toContain('ORDER BY z.score DESC NULLS LAST, z.zone_id ASC');
+    expect(rowsSql).toContain('LIMIT $2');
+    expect(rowsSql).toContain('OFFSET $3');
+    expect(rowsParams).toEqual([50, 100, 0]);
+    expect(countParams).toEqual([50]);
+  });
+
+  test('every explicit sort ends with the same zone_id tie-breaker', async () => {
+    await call('sort=composite_score&dir=desc');
+
+    const [rowsSql] = firstSql();
+    expect(rowsSql).toContain(
+      'ORDER BY z.composite_score DESC NULLS LAST, z.zone_id ASC'
+    );
+  });
+
+  test('minScore=0 explicitly disables the default Formation Score floor', async () => {
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValueOnce([]).mockResolvedValueOnce([{ n: 0 }]);
+
+    await call('minScore=0');
+
+    const [rowsSql, rowsParams] = firstSql();
+    expect(rowsSql).toContain('WHERE z.score >= $1');
+    expect(rowsParams).toEqual([0, 100, 0]);
   });
 
   test('binds filters and pagination in order, and sorts on the whitelisted column', async () => {
@@ -109,7 +129,7 @@ describe('GET /api/scanner/zones', () => {
     expect(rowsSql).toContain(
       'WHERE UPPER(i.symbol) = $1 AND z.side = $2 AND z.pattern = $3 AND z.score >= $4'
     );
-    expect(rowsSql).toContain('ORDER BY z.score ASC NULLS LAST');
+    expect(rowsSql).toContain('ORDER BY z.score ASC NULLS LAST, z.zone_id ASC');
     expect(rowsParams).toEqual(['RELIANCE', 'DEMAND', 'DBR', 70, 50, 100]);
 
     expect(countSql).toContain('WHERE UPPER(i.symbol) = $1');

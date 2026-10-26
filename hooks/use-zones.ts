@@ -2,6 +2,11 @@
 
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import type { Zone, Timeframe, ZoneSide, Pattern } from "@/lib/scanner/types";
+import {
+  DEFAULT_MIN_FORMATION_SCORE,
+  DEFAULT_ZONE_DIR,
+  DEFAULT_ZONE_SORT,
+} from "@/lib/scanner/filter-defaults";
 
 export interface ZoneFilters {
   // Primary filters
@@ -27,6 +32,13 @@ export interface ZoneFilters {
   limit?: number;
   offset?: number;
 }
+
+/** Initial filter state and the target state for Reset Filters. */
+export const DEFAULT_SCANNER_FILTERS: ZoneFilters = {
+  minScore: DEFAULT_MIN_FORMATION_SCORE,
+  sort: DEFAULT_ZONE_SORT,
+  dir: DEFAULT_ZONE_DIR,
+};
 
 export interface UseZonesReturn {
   zones: Zone[];
@@ -66,6 +78,9 @@ export function useZones(filters: ZoneFilters = {}): UseZonesReturn {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // Monotonic id so a slow response from an older filter set can never
+  // overwrite the results of a newer request (e.g. immediately after Reset).
+  const requestIdRef = useRef(0);
 
   // Memoized so the effect key is stable regardless of object identity.
   const queryString = useMemo(() => buildQueryString(filters), [filters]);
@@ -73,18 +88,21 @@ export function useZones(filters: ZoneFilters = {}): UseZonesReturn {
   latestQuery.current = queryString;
 
   const fetchZones = useCallback(async (qs: string) => {
+    const requestId = ++requestIdRef.current;
     abortRef.current?.abort();
-    abortRef.current = new AbortController();
+    const controller = new AbortController();
+    abortRef.current = controller;
 
     setLoading(true);
     setError(null);
 
     try {
       const res = await fetch(`/api/scanner/zones?${qs}`, {
-        signal: abortRef.current.signal,
+        signal: controller.signal,
         cache: "no-store",
       });
       const data = await res.json().catch(() => ({}));
+      if (requestId !== requestIdRef.current) return;
       if (!res.ok) {
         throw new Error(
           typeof data?.error === "string" ? data.error : `HTTP ${res.status}`
@@ -93,15 +111,21 @@ export function useZones(filters: ZoneFilters = {}): UseZonesReturn {
       setZones(data.zones ?? []);
       setCount(data.count ?? 0);
     } catch (err: any) {
+      if (requestId !== requestIdRef.current) return;
       if (err?.name !== "AbortError") {
         setError(err?.message ?? "Failed to load zones");
       }
     } finally {
-      setLoading(false);
+      if (requestId === requestIdRef.current) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
+    // Invalidate in-flight work as soon as the filters change, not after the
+    // debounce fires, so Reset cannot be overwritten by a stale response.
+    requestIdRef.current++;
+    abortRef.current?.abort();
+
     const timer = setTimeout(() => {
       void fetchZones(queryString);
     }, FILTER_DEBOUNCE_MS);

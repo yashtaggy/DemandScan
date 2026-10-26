@@ -23,15 +23,15 @@ import { ingestAllInstruments } from './ingest_all';
 import { ingestAllHourlyCandles } from './hourly_ingest';
 import { aggregate4HForAll } from './four_hour_agg';
 import { aggregateAllTimeframes } from './aggregation';
-import { detectPatterns, fetchCandlesForTimeframe } from './patterns';
-import { upsertZone } from './zones';
+import { detectPatterns, fetchCandlesForAllTimeframes } from './patterns';
+import { persistDetectedZones, type DetectedZoneInput } from './zones';
 import { updateZoneLifecycles, buildLatestSnapshots } from './lifecycle';
 import { updateScanJob } from './jobs';
 import { assertUniversePlayable, listNifty500InstrumentIds } from './universe';
 import { getNifty500Count } from '@/lib/nifty500';
 import { sanitizeErrorMessage } from './retry';
 import { DEFAULT_SCANNER_CONFIG } from './types';
-import type { ScannerConfig, Timeframe } from './types';
+import type { Candle, ScannerConfig, Timeframe } from './types';
 
 export interface OrchestratorOptions {
   jobId: string;
@@ -79,13 +79,41 @@ export async function detectAndUpsertZonesForInstrument(
 ): Promise<InstrumentDetectionResult> {
   const startedAt = Date.now();
   const outcomes: TimeframeDetectionOutcome[] = [];
+  const pending: DetectedZoneInput[] = [];
+
+  // One round trip for all timeframes instead of eight. On failure every
+  // timeframe is reported FAILED, so the instrument cannot be marked OK.
+  let candlesByTimeframe: Map<Timeframe, Candle[]> | null = null;
+  let fetchError: string | null = null;
+  try {
+    candlesByTimeframe = await fetchCandlesForAllTimeframes(
+      instrumentId,
+      SCAN_TIMEFRAMES
+    );
+  } catch (err) {
+    fetchError = sanitizeErrorMessage(err);
+    console.error(
+      `[orchestrator] candle fetch failed instrument=${instrumentId} error=${fetchError}`
+    );
+  }
 
   for (const tf of SCAN_TIMEFRAMES) {
     const timeframeStartedAt = Date.now();
+    if (fetchError) {
+      outcomes.push({
+        timeframe: tf,
+        status: 'FAILED',
+        candles: 0,
+        matches: 0,
+        durationMs: 0,
+        errorMessage: fetchError,
+      });
+      continue;
+    }
+
     try {
-      // One fetch per timeframe: detection and zone scoring must use the
-      // exact same candle window (they previously fetched it twice).
-      const candles = await fetchCandlesForTimeframe(instrumentId, tf);
+      // Detection and zone scoring must use the exact same candle window.
+      const candles = candlesByTimeframe?.get(tf) ?? [];
       if (candles.length === 0) {
         outcomes.push({
           timeframe: tf,
@@ -99,7 +127,7 @@ export async function detectAndUpsertZonesForInstrument(
 
       const matches = detectPatterns(candles, instrumentId, tf, config);
       for (const match of matches) {
-        await upsertZone(match, candles, config, config.version);
+        pending.push({ match, candles });
       }
       outcomes.push({
         timeframe: tf,
@@ -124,6 +152,27 @@ export async function detectAndUpsertZonesForInstrument(
     }
   }
 
+  // Persist every successfully detected zone in one batch (idempotent).
+  let persistError: string | null = null;
+  if (pending.length > 0) {
+    try {
+      const { inserted, skipped } = await persistDetectedZones(
+        pending,
+        config,
+        config.version
+      );
+      console.info(
+        `[orchestrator] zones instrument=${instrumentId} detected=${pending.length} ` +
+          `inserted=${inserted} existing=${skipped}`
+      );
+    } catch (err) {
+      persistError = sanitizeErrorMessage(err);
+      console.error(
+        `[orchestrator] zone persistence failed instrument=${instrumentId} error=${persistError}`
+      );
+    }
+  }
+
   const failedTimeframes = outcomes
     .filter((o) => o.status === 'FAILED')
     .map((o) => o.timeframe);
@@ -142,13 +191,15 @@ export async function detectAndUpsertZonesForInstrument(
       `failed=${failedTimeframes.length} durationMs=${result.durationMs}`
   );
 
-  if (failedTimeframes.length > 0) {
+  if (failedTimeframes.length > 0 || persistError) {
     const details = outcomes
       .filter((o) => o.status === 'FAILED')
       .map((o) => `${o.timeframe}=${o.errorMessage}`)
       .join('; ');
+    const persistDetail = persistError ? `persist=${persistError}` : '';
     throw new Error(
-      `Pattern detection failed for instrument ${instrumentId} on ${failedTimeframes.join(', ')}: ${details}`
+      `Pattern detection failed for instrument ${instrumentId} on ${failedTimeframes.join(', ')}` +
+        `${details ? `: ${details}` : ''}${persistDetail ? `; ${persistDetail}` : ''}`
     );
   }
 

@@ -256,7 +256,7 @@ curl http://localhost:3000/api/scanner/job/<jobId> \
 | `maxOppositionRisk` | number | Maximum opposition risk (0–100) |
 | `maxDistancePct` | number | Maximum distance from current price, percent |
 | `formationFrom` / `formationTo` | `YYYY-MM-DD` | Formation date range |
-| `sort` | `composite_score\|score\|formation_ts\|distance_pct` | Sort column (default `composite_score`) |
+| `sort` | `composite_score\|score\|formation_ts\|distance_pct` | Sort column (default `score`; `zone_id` breaks ties) |
 | `dir` | `asc\|desc` | Sort direction (default `desc`) |
 | `limit` | number | Max results (default 100, max 500) |
 | `offset` | number | Pagination offset (default 0) |

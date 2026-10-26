@@ -49,15 +49,21 @@ export const SCAN_STAGE_ORDER: ScanStage[] = [
   'LIFECYCLE',
 ];
 
-/** Conservative sizes so a batch finishes inside a 60s serverless function. */
+/**
+ * Sequential work per 60s serverless invocation. Sizes are sized from the
+ * persisted batch timings of the last successful full scan: the worst measured
+ * batch was 3.8s for DETECT_ZONES (3 instruments), 2.7s for INGEST_HOURLY and
+ * 2.1s for INGEST_DAILY, leaving >4x headroom at the new sizes. LIFECYCLE
+ * stays at 40 because its worst batch measured ~35s.
+ */
 export const STAGE_BATCH_SIZES: Record<ScanStage, number> = {
   // SYNC_INSTRUMENTS is one master download per batch (not sliced).
   SYNC_INSTRUMENTS: 1,
-  INGEST_DAILY: 3,
-  INGEST_HOURLY: 1,
-  AGGREGATE_DAILY: 12,
-  AGGREGATE_4H: 8,
-  DETECT_ZONES: 3,
+  INGEST_DAILY: 6,
+  INGEST_HOURLY: 2,
+  AGGREGATE_DAILY: 24,
+  AGGREGATE_4H: 16,
+  DETECT_ZONES: 10,
   LIFECYCLE: 40,
 };
 
@@ -84,6 +90,8 @@ export interface ScanBatchResult {
   durationMs: number;
   /** Suggested delay before the browser worker retries a transient failure. */
   retryAfterMs: number | null;
+  /** Job row as persisted by this batch, so callers need not re-read it. */
+  job: ScanJobRow | null;
 }
 
 export interface ScanWorkers {
@@ -205,6 +213,7 @@ async function unclaimedResult(
     processedInBatch: 0,
     durationMs: 0,
     retryAfterMs: null,
+    job: null,
   };
 
   if (!jobId) return empty;
@@ -224,6 +233,7 @@ async function unclaimedResult(
     progressPercent: job.progress_percent,
     moreRemaining: isRunnableStatus(job.status),
     errorMessage: job.error_message,
+    job,
   };
 }
 
@@ -278,6 +288,7 @@ export async function processScanBatch(
     processedInBatch: 0,
     durationMs: 0,
     retryAfterMs: null,
+    job: claimed,
   };
 
   const batchStartedAt = Date.now();
@@ -296,7 +307,7 @@ export async function processScanBatch(
     const durationMs = Date.now() - batchStartedAt;
 
     await store.completeBatch(batchId);
-    await store.persist({
+    const persisted = await store.persist({
       jobId: claimed.job_id,
       status: result.status,
       stage: result.stage,
@@ -327,6 +338,7 @@ export async function processScanBatch(
       processedInBatch: result.processedInBatch,
       durationMs,
       retryAfterMs: null,
+      job: persisted ?? claimed,
     };
   } catch (err: any) {
     const message = sanitizeErrorMessage(err);
@@ -345,7 +357,7 @@ export async function processScanBatch(
         `stage=${claimed.current_stage} attempt=${retries}/${claimed.max_retries}` +
         ` durationMs=${durationMs}${reason} error=${message}`
     );
-    await store.persist({
+    const persisted = await store.persist({
       jobId: claimed.job_id,
       status: exhausted ? 'FAILED' : 'RUNNING',
       stage: claimed.current_stage,
@@ -366,6 +378,7 @@ export async function processScanBatch(
       errorMessage: message,
       durationMs,
       retryAfterMs: exhausted ? null : backoffMs(retries),
+      job: persisted ?? claimed,
     };
   }
 }

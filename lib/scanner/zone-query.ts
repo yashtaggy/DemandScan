@@ -10,6 +10,13 @@
  */
 
 import type { LifecycleState, Pattern, Timeframe, ZoneSide } from './types';
+import {
+  DEFAULT_MIN_FORMATION_SCORE,
+  DEFAULT_ZONE_DIR,
+  DEFAULT_ZONE_SORT,
+} from './filter-defaults';
+
+export { DEFAULT_MIN_FORMATION_SCORE } from './filter-defaults';
 
 export const ZONE_TIMEFRAMES: readonly Timeframe[] = [
   '1H',
@@ -160,8 +167,15 @@ export function parseZoneQuery(searchParams: URLSearchParams): ZoneQueryResult {
   const lifecycle = parseEnum(searchParams.get('lifecycle'), 'lifecycle', ZONE_LIFECYCLES);
   if ('error' in lifecycle) return invalid(lifecycle.error);
 
-  const minScore = parseIntParam(searchParams.get('minScore'), 'minScore', 0, 100);
-  if ('error' in minScore) return invalid(minScore.error);
+  // Absent/blank minScore means "use the default Formation Score floor".
+  // A caller that wants every zone must send minScore=0 explicitly.
+  let minScore = DEFAULT_MIN_FORMATION_SCORE;
+  const rawMinScore = searchParams.get('minScore');
+  if (rawMinScore != null && rawMinScore.trim() !== '') {
+    const parsed = parseIntParam(rawMinScore, 'minScore', 0, 100);
+    if ('error' in parsed) return invalid(parsed.error);
+    minScore = parsed.value as number;
+  }
 
   const minCompositeScore = parseIntParam(
     searchParams.get('minCompositeScore'),
@@ -221,7 +235,7 @@ export function parseZoneQuery(searchParams: URLSearchParams): ZoneQueryResult {
   }
 
   const rawSort = searchParams.get('sort');
-  let sort: ZoneSortKey = 'composite_score';
+  let sort: ZoneSortKey = DEFAULT_ZONE_SORT;
   if (rawSort != null && rawSort.trim() !== '') {
     const key = rawSort.trim();
     if (!(key in ZONE_SORT_COLUMNS)) {
@@ -233,7 +247,7 @@ export function parseZoneQuery(searchParams: URLSearchParams): ZoneQueryResult {
   }
 
   const rawDir = searchParams.get('dir');
-  let dir: 'ASC' | 'DESC' = 'DESC';
+  let dir: 'ASC' | 'DESC' = DEFAULT_ZONE_DIR === 'asc' ? 'ASC' : 'DESC';
   if (rawDir != null && rawDir.trim() !== '') {
     const value = rawDir.trim().toLowerCase();
     if (value !== 'asc' && value !== 'desc') {
@@ -251,7 +265,7 @@ export function parseZoneQuery(searchParams: URLSearchParams): ZoneQueryResult {
       side: side.value,
       pattern: pattern.value,
       lifecycle: lifecycle.value,
-      minScore: minScore.value,
+      minScore,
       minCompositeScore: minCompositeScore.value,
       maxDistancePct: maxDistancePct.value,
       minConfluence: minConfluence.value,
