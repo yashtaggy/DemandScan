@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { getSessionIdFromCookies, requireSession } from '@/lib/kite-session';
 import { hashSessionId } from '@/lib/crypto';
-import { getScanJob } from '@/lib/scanner/jobs';
+import { getScanBatchStats, getScanJob } from '@/lib/scanner/jobs';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -40,5 +40,5 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: 'Job not found', code: 'JOB_NOT_FOUND' }, { status: 404 });
   }
 
-  return NextResponse.json({ job });
+  return NextResponse.json({ job, batches: await getScanBatchStats(jobId) });
 }

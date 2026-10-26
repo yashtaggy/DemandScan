@@ -2,30 +2,35 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { requireSession } from '@/lib/kite-session';
 import { getDb } from '@/lib/db';
-import type { Timeframe, ZoneSide } from '@/lib/scanner/types';
+import { parseZoneQuery, buildZoneWhere } from '@/lib/scanner/zone-query';
 
 /**
  * GET /api/scanner/zones
  *
- * Query params (all optional):
- *   instrumentId      number   – filter by instrument token
- *   symbol            string   – filter by symbol (case-insensitive)
- *   timeframe         string   – 1H|4H|1D|1W|1M|3M|6M|1Y
- *   side              string   – DEMAND|SUPPLY
- *   lifecycle         string   – CONFIRMED_FRESH|TOUCHED_ONCE|RETESTED|BROKEN
- *   minScore          number   – minimum formation score (0–100)
- *   minCompositeScore number   – minimum composite score (0–100)
- *   maxDistancePct    number   – max distance from current price (%)
- *   minConfluence     number   – minimum confluence score (0–100)
- *   maxOppositionRisk number   – max opposition risk (0–100)
- *   formationFrom     string   – formation date >= YYYY-MM-DD
- *   formationTo       string   – formation date <= YYYY-MM-DD
- *   limit             number   – max results (default 50)
- *   offset            number   – pagination offset (default 0)
- *   sort              string   – score|composite_score|formation_ts|distance_pct (default: composite_score)
- *   dir               string   – asc|desc (default: desc)
+ * Server-side filtering, sorting and pagination over persisted zones —
+ * independent of scanning (no scan is started or resumed by this endpoint).
  *
- * Returns: { zones: Zone[], count: number }
+ * Query params (all optional, validated; invalid values return 400):
+ *   instrumentId      positive integer
+ *   symbol            1–32 chars [A-Z0-9&.-], case-insensitive
+ *   timeframe         1H|4H|1D|1W|1M|3M|6M|1Y
+ *   side              DEMAND|SUPPLY
+ *   pattern           DBR|RBR|RBD|DBD
+ *   lifecycle         CONFIRMED_FRESH|TOUCHED_ONCE|RETESTED|BROKEN
+ *   minScore          0–100
+ *   minCompositeScore 0–100
+ *   maxDistancePct    0–100
+ *   minConfluence     0–100
+ *   maxOppositionRisk 0–100
+ *   formationFrom     YYYY-MM-DD
+ *   formationTo       YYYY-MM-DD
+ *   limit             1–500 (default 100)
+ *   offset            >= 0 (default 0)
+ *   sort              score|composite_score|formation_ts|distance_pct
+ *   dir               asc|desc
+ *
+ * Returns: { zones, count, limit, offset, hasMore }.
+ * `count` is the total number of matching zones, not the page size.
  */
 export async function GET(req: NextRequest) {
   try {
@@ -35,36 +40,20 @@ export async function GET(req: NextRequest) {
   }
 
   const { searchParams } = new URL(req.url);
-
-  const instrumentId      = searchParams.get('instrumentId')      ? Number(searchParams.get('instrumentId'))      : null;
-  const symbol            = searchParams.get('symbol')            ?? null;
-  const timeframe         = searchParams.get('timeframe')         as Timeframe ?? null;
-  const side              = searchParams.get('side')              as ZoneSide  ?? null;
-  const lifecycle         = searchParams.get('lifecycle')         ?? null;
-  const minScore          = searchParams.get('minScore')          ? Number(searchParams.get('minScore'))          : null;
-  const minCompositeScore = searchParams.get('minCompositeScore') ? Number(searchParams.get('minCompositeScore')) : null;
-  const maxDistancePct    = searchParams.get('maxDistancePct')    ? Number(searchParams.get('maxDistancePct'))    : null;
-  const minConfluence     = searchParams.get('minConfluence')     ? Number(searchParams.get('minConfluence'))     : null;
-  const maxOppositionRisk = searchParams.get('maxOppositionRisk') ? Number(searchParams.get('maxOppositionRisk')) : null;
-  const formationFrom     = searchParams.get('formationFrom')     ?? null;
-  const formationTo       = searchParams.get('formationTo')       ?? null;
-  const limit             = Math.min(Number(searchParams.get('limit')  ?? 50), 500);
-  const offset            = Number(searchParams.get('offset') ?? 0);
-
-  const allowedSorts: Record<string, string> = {
-    score:            'z.score',
-    composite_score:  'z.composite_score',
-    formation_ts:     'z.formation_ts',
-    distance_pct:     'z.distance_pct',
-  };
-  const sortCol = allowedSorts[searchParams.get('sort') ?? ''] ?? 'z.composite_score';
-  const sortDir = searchParams.get('dir') === 'asc' ? 'ASC' : 'DESC';
-
+  const parsed = parseZoneQuery(searchParams);
+  if (!parsed.ok) {
+    return NextResponse.json(
+      { error: parsed.error, code: 'INVALID_QUERY' },
+      { status: 400 }
+    );
+  }
+  const q = parsed.query;
   const sql = getDb();
+  const where = buildZoneWhere(q);
 
-  // Build data rows
-  const rows = await sql`
-    SELECT
+  // Data rows
+  const rows = await sql.query(
+    `SELECT
       z.zone_id, z.instrument_id, i.symbol,
       z.timeframe, z.pattern, z.side,
       z.base_start, z.base_end, z.leg_in_ts, z.leg_out_ts,
@@ -75,43 +64,21 @@ export async function GET(req: NextRequest) {
       z.lifecycle_state, z.last_touch_ts, z.touch_count, z.created_at
     FROM zones z
     JOIN instruments i ON i.instrument_id = z.instrument_id
-    WHERE
-      (${instrumentId}::bigint IS NULL OR z.instrument_id = ${instrumentId})
-      AND (${symbol}::text IS NULL OR UPPER(i.symbol) = UPPER(${symbol}))
-      AND (${timeframe}::text IS NULL OR z.timeframe = ${timeframe})
-      AND (${side}::text IS NULL OR z.side = ${side})
-      AND (${lifecycle}::text IS NULL OR z.lifecycle_state = ${lifecycle})
-      AND (${minScore}::int IS NULL OR z.score >= ${minScore})
-      AND (${minCompositeScore}::int IS NULL OR z.composite_score >= ${minCompositeScore})
-      AND (${maxDistancePct}::numeric IS NULL OR z.distance_pct <= ${maxDistancePct})
-      AND (${minConfluence}::int IS NULL OR z.confluence_score >= ${minConfluence})
-      AND (${maxOppositionRisk}::int IS NULL OR z.opposition_risk <= ${maxOppositionRisk})
-      AND (${formationFrom}::date IS NULL OR z.formation_ts::date >= ${formationFrom}::date)
-      AND (${formationTo}::date IS NULL OR z.formation_ts::date <= ${formationTo}::date)
-    ORDER BY ${sql.unsafe(sortCol)} ${sql.unsafe(sortDir)} NULLS LAST
-    LIMIT  ${limit}
-    OFFSET ${offset}
-  `;
+    ${where.clause}
+    ORDER BY ${q.sortColumn} ${q.dir} NULLS LAST
+    LIMIT $${where.params.length + 1}
+    OFFSET $${where.params.length + 2}`,
+    [...where.params, q.limit, q.offset]
+  );
 
-  // Count for pagination
-  const countRows = await sql`
-    SELECT COUNT(*) AS n
+  // Total matching count (independent of the page)
+  const countRows = await sql.query(
+    `SELECT COUNT(*) AS n
     FROM zones z
     JOIN instruments i ON i.instrument_id = z.instrument_id
-    WHERE
-      (${instrumentId}::bigint IS NULL OR z.instrument_id = ${instrumentId})
-      AND (${symbol}::text IS NULL OR UPPER(i.symbol) = UPPER(${symbol}))
-      AND (${timeframe}::text IS NULL OR z.timeframe = ${timeframe})
-      AND (${side}::text IS NULL OR z.side = ${side})
-      AND (${lifecycle}::text IS NULL OR z.lifecycle_state = ${lifecycle})
-      AND (${minScore}::int IS NULL OR z.score >= ${minScore})
-      AND (${minCompositeScore}::int IS NULL OR z.composite_score >= ${minCompositeScore})
-      AND (${maxDistancePct}::numeric IS NULL OR z.distance_pct <= ${maxDistancePct})
-      AND (${minConfluence}::int IS NULL OR z.confluence_score >= ${minConfluence})
-      AND (${maxOppositionRisk}::int IS NULL OR z.opposition_risk <= ${maxOppositionRisk})
-      AND (${formationFrom}::date IS NULL OR z.formation_ts::date >= ${formationFrom}::date)
-      AND (${formationTo}::date IS NULL OR z.formation_ts::date <= ${formationTo}::date)
-  `;
+    ${where.clause}`,
+    where.params
+  );
 
   const zones = rows.map((r: any) => ({
     zoneId: r.zone_id,
@@ -143,5 +110,12 @@ export async function GET(req: NextRequest) {
     createdAt: new Date(r.created_at),
   }));
 
-  return NextResponse.json({ zones, count: Number(countRows[0].n) });
+  const count = Number(countRows[0]?.n ?? 0);
+  return NextResponse.json({
+    zones,
+    count,
+    limit: q.limit,
+    offset: q.offset,
+    hasMore: q.offset + zones.length < count,
+  });
 }

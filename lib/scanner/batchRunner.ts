@@ -23,8 +23,14 @@ import {
 import {
   listActiveInstrumentIds,
   resolveInstrumentIdsBySymbol,
-  syncNseInstrumentsChunk,
+  syncInstrumentMaster,
 } from './instruments';
+import {
+  assertUniversePlayable,
+  listNifty500InstrumentIds,
+} from './universe';
+import { getNifty500Count } from '@/lib/nifty500';
+import { backoffMs, isPermanentError, sanitizeErrorMessage } from './retry';
 import { ingestDailyCandles } from './candle_ingest';
 import { ingestHourlyCandles } from './hourly_ingest';
 import { aggregateInstrument } from './aggregation';
@@ -45,7 +51,8 @@ export const SCAN_STAGE_ORDER: ScanStage[] = [
 
 /** Conservative sizes so a batch finishes inside a 60s serverless function. */
 export const STAGE_BATCH_SIZES: Record<ScanStage, number> = {
-  SYNC_INSTRUMENTS: 120,
+  // SYNC_INSTRUMENTS is one master download per batch (not sliced).
+  SYNC_INSTRUMENTS: 1,
   INGEST_DAILY: 3,
   INGEST_HOURLY: 1,
   AGGREGATE_DAILY: 12,
@@ -73,11 +80,16 @@ export interface ScanBatchResult {
   moreRemaining: boolean;
   errorMessage: string | null;
   processedInBatch: number;
+  /** Wall-clock time spent executing this batch (server-side). */
+  durationMs: number;
+  /** Suggested delay before the browser worker retries a transient failure. */
+  retryAfterMs: number | null;
 }
 
 export interface ScanWorkers {
-  syncChunk: typeof syncNseInstrumentsChunk;
+  syncMaster: typeof syncInstrumentMaster;
   listActiveIds: typeof listActiveInstrumentIds;
+  resolveNifty500: typeof listNifty500InstrumentIds;
   resolveSymbols: typeof resolveInstrumentIdsBySymbol;
   ingestDaily: typeof ingestDailyCandles;
   ingestHourly: typeof ingestHourlyCandles;
@@ -99,8 +111,9 @@ export interface ScanJobStore {
 }
 
 const defaultWorkers: ScanWorkers = {
-  syncChunk: syncNseInstrumentsChunk,
+  syncMaster: syncInstrumentMaster,
   listActiveIds: listActiveInstrumentIds,
+  resolveNifty500: listNifty500InstrumentIds,
   resolveSymbols: resolveInstrumentIdsBySymbol,
   ingestDaily: ingestDailyCandles,
   ingestHourly: ingestHourlyCandles,
@@ -164,18 +177,16 @@ function isRunnableStatus(status: ScanJobStatus): boolean {
 }
 
 /**
- * Make an error safe for server logs: cap the length and redact anything that
- * looks like a credential (Kite tokens, API keys, Postgres URLs). Never log
- * raw `err` objects — they can carry request headers or connection strings.
+ * A legitimate Nifty 500 scan cannot exceed a few hundred instruments. Any
+ * full-scan job carrying more than this was produced by the older
+ * all-instruments resolution and must be re-resolved.
  */
-function sanitizeErrorMessage(raw: unknown): string {
-  const text = String(
-    (raw as { message?: unknown } | null | undefined)?.message ?? raw ?? 'Unknown batch error'
-  );
-  return text
-    .replace(/(access_token|api_key|request_token|public_token|enctoken)=([^\s&]+)/gi, '$1=<redacted>')
-    .replace(/postgres(ql)?:\/\/[^\s"']+@[^\s"']+/gi, 'postgres://<redacted>')
-    .slice(0, 500);
+const MAX_FULL_SCAN_UNIVERSE = 1000;
+
+function isLegacyFullScanUniverse(job: ScanJobRow): boolean {
+  if (job.requested_symbols && job.requested_symbols.length > 0) return false;
+  const ids = job.instrument_ids;
+  return !!ids && ids.length > MAX_FULL_SCAN_UNIVERSE;
 }
 
 async function unclaimedResult(
@@ -192,6 +203,8 @@ async function unclaimedResult(
     moreRemaining: false,
     errorMessage: null,
     processedInBatch: 0,
+    durationMs: 0,
+    retryAfterMs: null,
   };
 
   if (!jobId) return empty;
@@ -225,7 +238,7 @@ export async function processScanBatch(
   workers: ScanWorkers = defaultWorkers
 ): Promise<ScanBatchResult> {
   const leaseOwner = opts.leaseOwner ?? randomUUID();
-  const claimed = await store.claim({
+  let claimed = await store.claim({
     jobId: opts.jobId,
     sessionIdHash: opts.sessionIdHash,
     leaseOwner,
@@ -233,6 +246,25 @@ export async function processScanBatch(
 
   if (!claimed) {
     return unclaimedResult(opts.jobId, opts.sessionIdHash ?? null, store);
+  }
+
+  // Jobs persisted by the pre-V1 code resolved a full scan to every active
+  // NSE instrument (~10k). Re-resolve the intended Nifty 500 universe instead
+  // of silently continuing with thousands of instruments.
+  if (isLegacyFullScanUniverse(claimed)) {
+    console.warn(
+      `[scanner] job ${claimed.job_id} has ${claimed.instrument_ids!.length} instruments ` +
+        'for a full scan; re-resolving the Nifty 500 universe before continuing'
+    );
+    claimed = {
+      ...claimed,
+      current_stage: 'SYNC_INSTRUMENTS',
+      cursor_instrument_id: 0,
+      processed_instruments: 0,
+      total_instruments: 0,
+      progress_percent: 0,
+      instrument_ids: null,
+    };
   }
 
   const empty: ScanBatchResult = {
@@ -244,8 +276,11 @@ export async function processScanBatch(
     moreRemaining: claimed.status === 'PENDING' || claimed.status === 'RUNNING',
     errorMessage: claimed.error_message,
     processedInBatch: 0,
+    durationMs: 0,
+    retryAfterMs: null,
   };
 
+  const batchStartedAt = Date.now();
   const batchId = await store.insertBatch({
     jobId: claimed.job_id,
     stage: claimed.current_stage,
@@ -258,6 +293,7 @@ export async function processScanBatch(
 
   try {
     const result = await executeClaimedBatch(claimed, opts.session ?? null, workers);
+    const durationMs = Date.now() - batchStartedAt;
 
     await store.completeBatch(batchId);
     await store.persist({
@@ -274,6 +310,12 @@ export async function processScanBatch(
       completedAt: result.status === 'SUCCESS' || result.status === 'FAILED' ? new Date() : null,
     });
 
+    console.info(
+      `[scanner] batch complete: jobId=${claimed.job_id} batchId=${batchId} ` +
+        `stage=${claimed.current_stage} status=${result.status} ` +
+        `processed=${result.processedInBatch} total=${result.totalInstruments} durationMs=${durationMs}`
+    );
+
     return {
       claimed: true,
       jobId: claimed.job_id,
@@ -283,16 +325,25 @@ export async function processScanBatch(
       moreRemaining: result.status === 'RUNNING' || result.status === 'PENDING',
       errorMessage: result.errorMessage,
       processedInBatch: result.processedInBatch,
+      durationMs,
+      retryAfterMs: null,
     };
   } catch (err: any) {
     const message = sanitizeErrorMessage(err);
+    const durationMs = Date.now() - batchStartedAt;
     await store.failBatch(batchId, message);
     const retries = claimed.retry_count + 1;
-    const exhausted = retries >= claimed.max_retries;
+    const permanent = isPermanentError(err);
+    const exhausted = permanent || retries >= claimed.max_retries;
+    const reason = permanent
+      ? ' (permanent error; job FAILED without retry)'
+      : exhausted
+        ? ' (retry budget exhausted; job FAILED)'
+        : '';
     console.error(
       `[scanner] batch failed: jobId=${claimed.job_id} batchId=${batchId} ` +
         `stage=${claimed.current_stage} attempt=${retries}/${claimed.max_retries}` +
-        `${exhausted ? ' (retry budget exhausted; job FAILED)' : ''} error=${message}`
+        ` durationMs=${durationMs}${reason} error=${message}`
     );
     await store.persist({
       jobId: claimed.job_id,
@@ -313,6 +364,8 @@ export async function processScanBatch(
       status: exhausted ? 'FAILED' : 'RUNNING',
       moreRemaining: !exhausted,
       errorMessage: message,
+      durationMs,
+      retryAfterMs: exhausted ? null : backoffMs(retries),
     };
   }
 }
@@ -371,6 +424,7 @@ async function executeClaimedBatch(
     batchSize
   );
 
+  const stageStartedAt = Date.now();
   for (const id of batch) {
     switch (job.current_stage) {
       case 'INGEST_DAILY':
@@ -392,6 +446,10 @@ async function executeClaimedBatch(
         break;
     }
   }
+  console.info(
+    `[scanner] stage=${job.current_stage} instruments=${batch.length} ` +
+      `cursor=${job.cursor_instrument_id}->${nextCursor} durationMs=${Date.now() - stageStartedAt}`
+  );
 
   return advanceAfterInstrumentBatch(job, ids, nextCursor, done, batch.length);
 }
@@ -411,47 +469,7 @@ async function tryResolveUniverseWithoutSync(
   return null;
 }
 
-async function runSyncStage(
-  job: ScanJobRow,
-  session: KiteSession,
-  workers: ScanWorkers
-): Promise<InternalAdvance> {
-  const alreadyResolved = await tryResolveUniverseWithoutSync(job, workers);
-  if (alreadyResolved) {
-    return {
-      status: 'RUNNING',
-      stage: 'INGEST_DAILY',
-      cursorInstrumentId: 0,
-      processedInstruments: 0,
-      totalInstruments: alreadyResolved.length,
-      progressPercent: 5,
-      instrumentIds: alreadyResolved,
-      errorMessage: null,
-      processedInBatch: 0,
-    };
-  }
-
-  const chunk = await workers.syncChunk(
-    session,
-    job.cursor_instrument_id,
-    STAGE_BATCH_SIZES.SYNC_INSTRUMENTS
-  );
-
-  if (!chunk.done) {
-    return {
-      status: 'RUNNING',
-      stage: 'SYNC_INSTRUMENTS',
-      cursorInstrumentId: chunk.lastId,
-      processedInstruments: job.processed_instruments + chunk.upserted,
-      totalInstruments: job.total_instruments,
-      progressPercent: 2,
-      instrumentIds: job.instrument_ids,
-      errorMessage: null,
-      processedInBatch: chunk.upserted,
-    };
-  }
-
-  const ids = await resolveUniverseAfterSync(job, workers);
+function advanceToIngest(ids: number[], processedInBatch: number): InternalAdvance {
   return {
     status: 'RUNNING',
     stage: 'INGEST_DAILY',
@@ -461,8 +479,50 @@ async function runSyncStage(
     progressPercent: 5,
     instrumentIds: ids,
     errorMessage: null,
-    processedInBatch: chunk.upserted,
+    processedInBatch,
   };
+}
+
+async function runSyncStage(
+  job: ScanJobRow,
+  session: KiteSession,
+  workers: ScanWorkers
+): Promise<InternalAdvance> {
+  const alreadyResolved = await tryResolveUniverseWithoutSync(job, workers);
+  if (alreadyResolved) {
+    return advanceToIngest(alreadyResolved, 0);
+  }
+
+  const isFullScan =
+    !(job.instrument_ids && job.instrument_ids.length > 0) &&
+    !(job.requested_symbols && job.requested_symbols.length > 0);
+
+  // Warm path: a previous sync seeded membership. Reuse it instead of
+  // re-downloading the ~10k-row Kite instrument master on every scan. A
+  // partial membership is NEVER reused: fall through to a full sync/reseed so
+  // an outdated or truncated universe repairs itself instead of hard-failing.
+  if (isFullScan) {
+    const expected = getNifty500Count();
+    const existing = await workers.resolveNifty500();
+    if (expected > 0 && existing.length >= expected) {
+      assertUniversePlayable(existing.length, expected);
+      console.info(
+        `[scanner] full scan universe: reusing ${existing.length} Nifty 500 instruments from membership`
+      );
+      return advanceToIngest(existing, 0);
+    }
+    if (existing.length > 0) {
+      console.warn(
+        `[scanner] full scan universe: membership has only ${existing.length}/${expected} instruments; ` +
+          're-syncing the instrument master and reseeding membership before scanning'
+      );
+    }
+  }
+
+  const sync = await workers.syncMaster(session);
+  const ids = await resolveUniverseAfterSync(job, workers);
+
+  return advanceToIngest(ids, sync.upserted);
 }
 
 async function resolveUniverseAfterSync(
@@ -486,7 +546,13 @@ async function resolveUniverseAfterSync(
     }
     return resolved;
   }
-  return workers.listActiveIds();
+
+  // Full scan: ONLY the persisted Nifty 500 membership. Never fall back to
+  // every active NSE instrument.
+  const ids = await workers.resolveNifty500();
+  assertUniversePlayable(ids.length, getNifty500Count());
+  console.info(`[scanner] full scan universe: resolved ${ids.length} Nifty 500 instruments`);
+  return ids;
 }
 
 async function ensureInstrumentUniverse(
@@ -507,11 +573,27 @@ async function runLifecycleStage(
     job.cursor_instrument_id,
     STAGE_BATCH_SIZES.LIFECYCLE
   );
+  const startedAt = Date.now();
   const snapshots = await workers.snapshots(batch);
   await workers.lifecycles(snapshots, DEFAULT_SCANNER_CONFIG);
 
+  // NO_DATA is a valid outcome (no daily candles yet), but it must be explicit
+  // so a lifecycle stage never looks complete when nothing was evaluated.
+  const snapshotIds = new Set(snapshots.map((s) => s.instrumentId));
+  const missing = batch.filter((id) => !snapshotIds.has(id));
+  if (missing.length > 0) {
+    console.warn(
+      `[scanner] lifecycle: ${missing.length}/${batch.length} instruments had no daily candles; ` +
+        `no lifecycle update for ids=${missing.slice(0, 20).join(',')}${missing.length > 20 ? ',...' : ''}`
+    );
+  }
+  const processed = done ? ids.length : ids.filter((id) => id <= nextCursor).length;
+  console.info(
+    `[scanner] stage=LIFECYCLE instruments=${batch.length} snapshots=${snapshots.length} ` +
+      `noData=${missing.length} processed=${processed}/${ids.length} durationMs=${Date.now() - startedAt}`
+  );
+
   if (!done) {
-    const processed = ids.filter((id) => id <= nextCursor).length;
     return {
       status: 'RUNNING',
       stage: 'LIFECYCLE',

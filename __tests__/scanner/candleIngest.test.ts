@@ -28,6 +28,7 @@ jest.mock("@/lib/kite-client", () => ({
 
 const dailyCandles = new Map<string, any>();
 const checkpoints = new Map<number, Date>();
+let firstStoredCandle: string | Date | null = null;
 
 jest.mock("@/lib/db", () => ({
   getDb: () => {
@@ -41,7 +42,13 @@ jest.mock("@/lib/db", () => ({
 
       if (query.includes("SELECT") && query.includes("ingestion_checkpoints")) {
         const cp = checkpoints.get(values[0] as number);
-        return cp ? [{ last_candle_date: cp }] : [];
+        return [{
+          last_candle_date: cp ?? null,
+          first_candle_date: firstStoredCandle,
+        }];
+      }
+      if (query.includes("candle_coverage")) {
+        return [];
       }
       if (query.includes("INSERT") && query.includes("daily_candles")) {
         const key = `${values[0]}:${(values[1] as Date).toISOString()}`;
@@ -60,6 +67,26 @@ jest.mock("@/lib/db", () => ({
       if (query.includes("INSERT") && query.includes("ingestion_checkpoints")) {
         checkpoints.set(values[0] as number, values[1] as Date);
         return [];
+      }
+      return [];
+    };
+
+    (sql as any).query = async (text: string, params: unknown[]) => {
+      if (text.includes("INSERT INTO daily_candles")) {
+        // 8 bind params per row: instrument, date, o, h, l, c, volume, source
+        for (let i = 0; i + 7 < params.length; i += 8) {
+          const key = `${params[i]}:${(params[i + 1] as Date).toISOString()}`;
+          dailyCandles.set(key, {
+            instrumentId: params[i],
+            date: params[i + 1],
+            open: params[i + 2],
+            high: params[i + 3],
+            low: params[i + 4],
+            close: params[i + 5],
+            volume: params[i + 6],
+            source: params[i + 7],
+          });
+        }
       }
       return [];
     };
@@ -91,6 +118,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   dailyCandles.clear();
   checkpoints.clear();
+  firstStoredCandle = null;
 });
 
 describe("ingestDailyCandles — kiteconnect v5 getHistoricalData", () => {
@@ -216,5 +244,72 @@ describe("ingestDailyCandles — kiteconnect v5 getHistoricalData", () => {
     ).rejects.toMatchObject({ error_type: "PermissionException" });
 
     expect(getHistoricalData).toHaveBeenCalledTimes(1);
+  });
+
+  test("resumes from a DATE checkpoint returned as a string by the Neon driver", async () => {
+    // DATE columns come back as 'YYYY-MM-DD' strings, not Date objects.
+    // The previous .getTime() call on this value crashed warm scans.
+    checkpoints.set(INSTRUMENT_ID, "2024-01-10" as any);
+    getHistoricalData.mockResolvedValue([]);
+
+    const inserted = await ingestDailyCandles(
+      session,
+      INSTRUMENT_ID,
+      new Date("2024-01-01T00:00:00Z"),
+      new Date("2024-01-30T00:00:00Z")
+    );
+
+    expect(inserted).toBe(0);
+    // Resumes the day AFTER the checkpoint, not from the original fromDate.
+    expect(getHistoricalData).toHaveBeenCalledWith(
+      INSTRUMENT_ID,
+      "day",
+      "2024-01-11 09:15:00",
+      "2024-01-30 15:30:00"
+    );
+  });
+
+  test("requests a full span in ~5-year chunks instead of 30-day windows", async () => {
+    getHistoricalData.mockResolvedValue([]);
+
+    await ingestDailyCandles(
+      session,
+      INSTRUMENT_ID,
+      new Date("2015-01-01T00:00:00Z"),
+      new Date("2024-01-01T00:00:00Z")
+    );
+
+    // 9 years / 1800-day chunks = 2 requests (the old 30-day loop issued ~110).
+    expect(getHistoricalData).toHaveBeenCalledTimes(2);
+    const [, , firstFrom, firstTo] = getHistoricalData.mock.calls[0];
+    const spanDays =
+      (Date.parse(`${firstTo.slice(0, 10)}T00:00:00Z`) -
+        Date.parse(`${firstFrom.slice(0, 10)}T00:00:00Z`)) /
+      86_400_000;
+    expect(spanDays).toBe(1800);
+  });
+
+  test("backfills history older than the stored range instead of skipping it", async () => {
+    checkpoints.set(INSTRUMENT_ID, new Date("2025-06-01T00:00:00Z"));
+    firstStoredCandle = "2025-01-01";
+    getHistoricalData.mockResolvedValue([]);
+
+    await ingestDailyCandles(
+      session,
+      INSTRUMENT_ID,
+      new Date("2024-01-01T00:00:00Z"),
+      new Date("2025-06-02T00:00:00Z")
+    );
+
+    // 1) backfill 2024-01-01 → 2024-12-31, then 2) resume after the checkpoint.
+    expect(getHistoricalData).toHaveBeenCalledTimes(2);
+    expect(getHistoricalData.mock.calls[0][2]).toBe("2024-01-01 09:15:00");
+    expect(getHistoricalData.mock.calls[0][3]).toBe("2024-12-31 15:30:00");
+    expect(getHistoricalData.mock.calls[1][2]).toBe("2025-06-02 09:15:00");
+
+    // A backfill never moves the incremental checkpoint backwards.
+    expect(checkpoints.get(INSTRUMENT_ID)?.toISOString()).toBe(
+      new Date("2025-06-01T00:00:00Z").toISOString()
+    );
   });
 });

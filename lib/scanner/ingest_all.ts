@@ -2,6 +2,7 @@ import { getDb } from "../db";
 import { createKiteClient } from "../kite-client";
 import type { KiteSession } from "../types";
 import { ingestDailyCandles } from "./candle_ingest";
+import { isPermanentError, sanitizeErrorMessage } from "./retry";
 import type { Instrument } from "./types";
 
 /**
@@ -48,11 +49,32 @@ export async function ingestAllInstruments(
   const instrumentIds: number[] = rows.map((r: any) => r.instrument_id as number);
 
   let totalInserted = 0;
+  const failures: Array<{ instrumentId: number; message: string }> = [];
+  let permanentFailure: unknown = null;
 
   await parallelLimit(instrumentIds, concurrency, async (instrumentId) => {
-    const inserted = await ingestDailyCandles(session, instrumentId, fromDate, toDate);
-    totalInserted += inserted;
+    if (permanentFailure) return;
+    try {
+      const inserted = await ingestDailyCandles(session, instrumentId, fromDate, toDate);
+      totalInserted += inserted;
+    } catch (err) {
+      failures.push({ instrumentId, message: sanitizeErrorMessage(err) });
+      if (isPermanentError(err) && permanentFailure == null) permanentFailure = err;
+    }
   });
+
+  // Do not let a partial run look successful: the old per-instrument catch
+  // swallowed every error and returned normally.
+  if (permanentFailure) throw permanentFailure;
+  if (failures.length > 0) {
+    const sample = failures
+      .slice(0, 5)
+      .map((f) => `${f.instrumentId}: ${f.message}`)
+      .join('; ');
+    throw new Error(
+      `${failures.length}/${instrumentIds.length} instrument(s) failed daily ingestion: ${sample}`
+    );
+  }
 
   return totalInserted;
 }

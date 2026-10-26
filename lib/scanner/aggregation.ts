@@ -98,7 +98,13 @@ function getPeriodExpression(tf: AggregationTimeframe): string {
 
 /**
  * Aggregate a single instrument across all timeframes.
- * Useful for incremental updates after new candles arrive.
+ *
+ * Incremental: each timeframe only re-aggregates from the period-start of its
+ * last stored bar, so a warm scan does not rescan the instrument's entire
+ * daily history five times. If a historical backfill added daily bars before
+ * the oldest stored aggregate, that timeframe is rebuilt once from 1900-01-01
+ * so backfilled history is never silently left out. Idempotent upserts make
+ * re-running the latest period safe.
  */
 export async function aggregateInstrument(instrumentId: number): Promise<void> {
   const sql = getDb();
@@ -129,6 +135,19 @@ export async function aggregateInstrument(instrumentId: number): Promise<void> {
           SUM(volume)                                           AS volume
         FROM daily_candles
         WHERE instrument_id = ${instrumentId}
+          AND candle_date >= CASE
+            -- A historical backfill added daily bars before the oldest stored
+            -- aggregate: rebuild this timeframe from the start once.
+            WHEN (SELECT MIN(candle_date) FROM daily_candles WHERE instrument_id = ${instrumentId})
+               < (SELECT MIN(period_start) FROM aggregated_candles
+                  WHERE instrument_token = ${instrumentId} AND timeframe = ${tf})
+            THEN DATE '1900-01-01'
+            ELSE COALESCE(
+              (SELECT MAX(period_start) FROM aggregated_candles
+               WHERE instrument_token = ${instrumentId} AND timeframe = ${tf}),
+              DATE '1900-01-01'
+            )
+          END
         GROUP BY instrument_id, (${sql.unsafe(periodExpr)})
       ) sub
       ON CONFLICT (instrument_token, timeframe, period_start)

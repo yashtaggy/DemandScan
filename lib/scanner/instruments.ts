@@ -1,101 +1,100 @@
 import { getDb } from "../db";
 import { createKiteClient } from "../kite-client";
 import type { KiteSession } from "../types";
-import type { Instrument } from "./types";
+import { bulkUpsert } from "./bulk";
+import { seedNifty500Membership, type MembershipSeedResult } from "./universe";
 
 /**
- * Fetch the NSE instrument master from Kite and upsert into the `instruments` table.
- *
- * The function is idempotent – repeated calls will update existing rows without
- * deleting any data. It records the `source` as "kite" and updates `updated_at`.
- *
- * @param session - Valid Kite session containing an access token.
- * @returns the number of rows upserted/updated.
+ * Extract NSE equity rows from a Kite instrument master.
+ * Deduplicated by instrument token (the master can contain repeated tokens).
  */
-function nseEquityRows(rawInstruments: any[]): Array<[number, string, string, string | null, boolean, string, Date]> {
-  return rawInstruments
-    .filter((raw) => raw.segment === "NSE" || raw.segment === "NSE-EQ")
-    .filter((raw) => raw.instrument_type === "EQ")
-    .map((raw) => [
-      Number(raw.instrument_token),
+function nseEquityRows(
+  rawInstruments: any[]
+): Array<[number, string, string, string | null, boolean, string, Date]> {
+  const byToken = new Map<number, [number, string, string, string | null, boolean, string, Date]>();
+  const now = new Date();
+
+  for (const raw of rawInstruments) {
+    if (raw.segment !== "NSE" && raw.segment !== "NSE-EQ") continue;
+    if (raw.instrument_type !== "EQ") continue;
+    const token = Number(raw.instrument_token);
+    if (!Number.isFinite(token)) continue;
+    byToken.set(token, [
+      token,
       raw.tradingsymbol as string,
       raw.exchange as string,
       (raw.name ?? null) as string | null,
       true,
       "kite",
-      new Date(),
+      now,
     ]);
+  }
+
+  return [...byToken.values()];
 }
 
-async function upsertInstrumentRow(
-  sql: ReturnType<typeof getDb>,
-  v: [number, string, string, string | null, boolean, string, Date]
-): Promise<void> {
-  await sql`
-    INSERT INTO instruments (
-      instrument_id, symbol, exchange, company_name, active, source, updated_at
-    ) VALUES (
-      ${v[0]}, ${v[1]}, ${v[2]},
-      ${v[3]}, ${v[4]}, ${v[5]}, ${v[6]}
-    )
-    ON CONFLICT (instrument_id) DO UPDATE SET
+async function upsertInstrumentRows(
+  rows: Array<[number, string, string, string | null, boolean, string, Date]>
+): Promise<number> {
+  return bulkUpsert({
+    table: "instruments",
+    columns: [
+      "instrument_id",
+      "symbol",
+      "exchange",
+      "company_name",
+      "active",
+      "source",
+      "updated_at",
+    ],
+    rows,
+    conflictClause: `ON CONFLICT (instrument_id) DO UPDATE SET
       symbol       = EXCLUDED.symbol,
       exchange     = EXCLUDED.exchange,
       company_name = EXCLUDED.company_name,
       active       = EXCLUDED.active,
       source       = EXCLUDED.source,
-      updated_at   = EXCLUDED.updated_at
-  `;
+      updated_at   = EXCLUDED.updated_at`,
+  });
 }
 
-export async function syncNseInstruments(session: KiteSession): Promise<number> {
-  const kc = createKiteClient(session.accessToken);
-  const rawInstruments = (await kc.getInstruments("NSE")) as any[];
-  const sql = getDb();
-  let upsertCount = 0;
-
-  const BATCH_SIZE = 500;
-  const values = nseEquityRows(rawInstruments);
-  for (let i = 0; i < values.length; i += BATCH_SIZE) {
-    const batch = values.slice(i, i + BATCH_SIZE);
-    for (const v of batch) {
-      await upsertInstrumentRow(sql, v);
-      upsertCount++;
-    }
-  }
-
-  return upsertCount;
+export interface InstrumentSyncResult {
+  /** Instrument rows upserted from the Kite master. */
+  upserted: number;
+  /** Rows added to nifty500_membership by this sync (0 if already seeded). */
+  membershipSeeded: number;
+  universe: MembershipSeedResult;
 }
 
 /**
- * Idempotent instrument-master upsert for one bounded slice, ordered by token.
- * Re-fetches the Kite master each call (one API request) then skips tokens
- * already processed according to `afterInstrumentId`.
+ * Download the NSE instrument master ONCE, upsert all NSE EQ rows, and seed
+ * the Nifty 500 membership table from the curated constituent list.
+ *
+ * One download per sync stage — the previous chunked implementation
+ * re-downloaded the full master for every 120 instruments.
  */
-export async function syncNseInstrumentsChunk(
-  session: KiteSession,
-  afterInstrumentId: number,
-  limit: number
-): Promise<{ upserted: number; lastId: number; done: boolean }> {
+export async function syncInstrumentMaster(
+  session: KiteSession
+): Promise<InstrumentSyncResult> {
   const kc = createKiteClient(session.accessToken);
-  const rawInstruments = (await kc.getInstruments("NSE")) as any[];
-  const sql = getDb();
+  const rawInstruments = (await kc.getInstruments("NSE")) as unknown as any[];
 
-  const remaining = nseEquityRows(rawInstruments)
-    .sort((a, b) => a[0] - b[0])
-    .filter((v) => v[0] > afterInstrumentId);
+  const rows = nseEquityRows(rawInstruments);
+  const upserted = await upsertInstrumentRows(rows);
+  const universe = await seedNifty500Membership();
 
-  const batch = remaining.slice(0, limit);
-  for (const v of batch) {
-    await upsertInstrumentRow(sql, v);
-  }
+  console.info(
+    `[scanner] instrument sync: nseEquity=${upserted} curated=${universe.curated} ` +
+      `matched=${universe.matched} membershipSeeded=${universe.seeded} ` +
+      `membershipClosed=${universe.removed} placeholdersExcluded=${universe.excludedPlaceholders.length}`
+  );
 
-  const lastId = batch.length > 0 ? batch[batch.length - 1][0] : afterInstrumentId;
-  return {
-    upserted: batch.length,
-    lastId,
-    done: remaining.length <= limit,
-  };
+  return { upserted, membershipSeeded: universe.seeded, universe };
+}
+
+/** Full instrument sync (kept for local/long-running callers). */
+export async function syncNseInstruments(session: KiteSession): Promise<number> {
+  return (await syncInstrumentMaster(session)).upserted;
 }
 
 export async function listActiveInstrumentIds(limitToIds?: number[]): Promise<number[]> {

@@ -199,6 +199,94 @@ export function detectPatterns(
 import { getDb } from '@/lib/db';
 
 /**
+ * Fetch the most recent `limit` candles for an instrument + timeframe, returned
+ * in ascending date order.
+ *
+ * The previous `ORDER BY ... ASC LIMIT 500` selected the OLDEST 500 candles:
+ * once an instrument had more history than that, recent zones were never
+ * detected. The inner DESC + outer ASC keeps the newest window while
+ * preserving the detector's required chronological order.
+ */
+export async function fetchCandlesForTimeframe(
+  instrumentId: number,
+  timeframe: Timeframe,
+  limit = 500
+): Promise<Candle[]> {
+  const sql = getDb();
+  let rows: any[];
+
+  if (timeframe === '1H') {
+    rows = await sql`
+      SELECT * FROM (
+        SELECT instrument_id AS instrument_token,
+               candle_ts     AS period_start,
+               open, high, low, close, volume
+        FROM hourly_candles
+        WHERE instrument_id       = ${instrumentId}
+          AND is_session_complete = TRUE
+        ORDER BY candle_ts DESC
+        LIMIT ${limit}
+      ) recent
+      ORDER BY period_start ASC
+    `;
+  } else if (timeframe === '4H') {
+    // Only complete AM sessions are eligible for zone formation
+    rows = await sql`
+      SELECT * FROM (
+        SELECT instrument_id AS instrument_token,
+               session_ts    AS period_start,
+               open, high, low, close, volume
+        FROM four_hour_candles
+        WHERE instrument_id = ${instrumentId}
+          AND is_complete   = TRUE
+        ORDER BY session_ts DESC
+        LIMIT ${limit}
+      ) recent
+      ORDER BY period_start ASC
+    `;
+  } else if (timeframe === '1D') {
+    rows = await sql`
+      SELECT * FROM (
+        SELECT instrument_id AS instrument_token,
+               candle_date   AS period_start,
+               open, high, low, close, volume
+        FROM daily_candles
+        WHERE instrument_id = ${instrumentId}
+        ORDER BY candle_date DESC
+        LIMIT ${limit}
+      ) recent
+      ORDER BY period_start ASC
+    `;
+  } else {
+    rows = await sql`
+      SELECT * FROM (
+        SELECT instrument_token,
+               period_start,
+               open, high, low, close, volume
+        FROM aggregated_candles
+        WHERE instrument_token = ${instrumentId}
+          AND timeframe        = ${timeframe}
+        ORDER BY period_start DESC
+        LIMIT ${limit}
+      ) recent
+      ORDER BY period_start ASC
+    `;
+  }
+
+  return rows.map((r: any): Candle => ({
+    instrumentId: Number(r.instrument_token),
+    date: new Date(r.period_start),
+    open: Number(r.open),
+    high: Number(r.high),
+    low: Number(r.low),
+    close: Number(r.close),
+    volume: Number(r.volume),
+    source: 'db',
+    isComplete: true,
+  }));
+}
+
+/**
  * Fetch candles from DB for an instrument + timeframe and return all detected
  * pattern matches. Handles all eight supported timeframes:
  *
@@ -213,66 +301,6 @@ export async function detectPatternsForInstrument(
   cfg: ScannerConfig,
   limit = 500
 ): Promise<PatternMatch[]> {
-  const sql = getDb();
-  let rows: any[];
-
-  if (timeframe === '1H') {
-    rows = await sql`
-      SELECT instrument_id AS instrument_token,
-             candle_ts     AS period_start,
-             open, high, low, close, volume
-      FROM hourly_candles
-      WHERE instrument_id       = ${instrumentId}
-        AND is_session_complete = TRUE
-      ORDER BY candle_ts ASC
-      LIMIT ${limit}
-    `;
-  } else if (timeframe === '4H') {
-    // Only complete AM sessions are eligible for zone formation
-    rows = await sql`
-      SELECT instrument_id AS instrument_token,
-             session_ts    AS period_start,
-             open, high, low, close, volume
-      FROM four_hour_candles
-      WHERE instrument_id = ${instrumentId}
-        AND is_complete   = TRUE
-      ORDER BY session_ts ASC
-      LIMIT ${limit}
-    `;
-  } else if (timeframe === '1D') {
-    rows = await sql`
-      SELECT instrument_id AS instrument_token,
-             candle_date   AS period_start,
-             open, high, low, close, volume
-      FROM daily_candles
-      WHERE instrument_id = ${instrumentId}
-      ORDER BY candle_date ASC
-      LIMIT ${limit}
-    `;
-  } else {
-    rows = await sql`
-      SELECT instrument_token,
-             period_start,
-             open, high, low, close, volume
-      FROM aggregated_candles
-      WHERE instrument_token = ${instrumentId}
-        AND timeframe        = ${timeframe}
-      ORDER BY period_start ASC
-      LIMIT ${limit}
-    `;
-  }
-
-  const candles: Candle[] = rows.map((r: any) => ({
-    instrumentId: Number(r.instrument_token),
-    date: new Date(r.period_start),
-    open: Number(r.open),
-    high: Number(r.high),
-    low: Number(r.low),
-    close: Number(r.close),
-    volume: Number(r.volume),
-    source: 'db',
-    isComplete: true,
-  }));
-
+  const candles = await fetchCandlesForTimeframe(instrumentId, timeframe, limit);
   return detectPatterns(candles, instrumentId, timeframe, cfg);
 }

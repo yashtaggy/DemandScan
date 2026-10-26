@@ -12,11 +12,23 @@ export interface ScanJob {
   startedAt: string;
   completedAt: string | null;
   currentStage: string | null;
+  totalInstruments: number;
+  processedInstruments: number;
+  retryCount: number;
+}
+
+export interface ScanBatchCounters {
+  completed: number;
+  failed: number;
+  total: number;
 }
 
 export interface UseScannerJobReturn {
   job: ScanJob | null;
+  batches: ScanBatchCounters;
   launching: boolean;
+  /** True while an existing job is being resumed after a page load. */
+  resuming: boolean;
   launch: (opts?: {
     from?: string;
     to?: string;
@@ -30,6 +42,18 @@ export interface UseScannerJobReturn {
 const POLL_INTERVAL_MS = 2000;
 const LEASE_RETRY_MS = 1500;
 const NETWORK_RETRY_MS = 2000;
+const MAX_NETWORK_BACKOFF_MS = 15_000;
+const MAX_CONSECUTIVE_BATCH_FAILURES = 20;
+
+const EMPTY_BATCHES: ScanBatchCounters = { completed: 0, failed: 0, total: 0 };
+
+function mapBatches(raw: any): ScanBatchCounters {
+  return {
+    completed: Number(raw?.completed ?? 0),
+    failed: Number(raw?.failed ?? 0),
+    total: Number(raw?.total ?? 0),
+  };
+}
 
 function mapJob(jobId: string, raw: any): ScanJob {
   return {
@@ -40,7 +64,14 @@ function mapJob(jobId: string, raw: any): ScanJob {
     startedAt: raw?.started_at ?? "",
     completedAt: raw?.completed_at ?? null,
     currentStage: raw?.current_stage ?? null,
+    totalInstruments: Number(raw?.total_instruments ?? 0),
+    processedInstruments: Number(raw?.processed_instruments ?? 0),
+    retryCount: Number(raw?.retry_count ?? 0),
   };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function isTerminal(status: ScanJobStatus): boolean {
@@ -49,9 +80,12 @@ function isTerminal(status: ScanJobStatus): boolean {
 
 export function useScannerJob(): UseScannerJobReturn {
   const [job, setJob] = useState<ScanJob | null>(null);
+  const [batches, setBatches] = useState<ScanBatchCounters>(EMPTY_BATCHES);
   const [launching, setLaunching] = useState(false);
+  const [resuming, setResuming] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const workerAbort = useRef<AbortController | null>(null);
+  const resumedRef = useRef(false);
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
@@ -73,6 +107,7 @@ export function useScannerJob(): UseScannerJobReturn {
         const data = await res.json();
         const j = mapJob(jobId, data.job);
         setJob(j);
+        if (data.batches) setBatches(mapBatches(data.batches));
         if (isTerminal(j.status)) {
           stopPolling();
           stopWorker();
@@ -93,6 +128,17 @@ export function useScannerJob(): UseScannerJobReturn {
    */
   const driveBatches = useCallback(
     async (jobId: string, signal: AbortSignal) => {
+      let networkFailures = 0;
+      const backoff = () =>
+        Math.min(
+          MAX_NETWORK_BACKOFF_MS,
+          NETWORK_RETRY_MS * Math.pow(2, Math.min(networkFailures - 1, 3))
+        );
+      const giveUp = (message: string) => {
+        setJob((prev) => (prev ? { ...prev, errorMessage: message } : prev));
+        stopPolling();
+      };
+
       while (!signal.aborted) {
         try {
           const res = await fetch("/api/scanner/batch", {
@@ -103,19 +149,32 @@ export function useScannerJob(): UseScannerJobReturn {
           });
 
           if (res.status === 401) {
-            setJob((prev) =>
-              prev
-                ? {
-                    ...prev,
-                    errorMessage:
-                      "Session expired. Reconnect Zerodha, then press Run scan to resume.",
-                  }
-                : prev
+            giveUp(
+              "Session expired. Reconnect Zerodha, then press Run scan to resume."
             );
-            stopPolling();
             break;
           }
 
+          if (res.status === 404) {
+            giveUp("This scan job no longer exists. Start a new scan.");
+            break;
+          }
+
+          if (!res.ok) {
+            // Route-level failure (e.g. DB hiccup). Progress is checkpointed,
+            // so retry the same job with bounded backoff — never a new scan.
+            networkFailures += 1;
+            if (networkFailures >= MAX_CONSECUTIVE_BATCH_FAILURES) {
+              giveUp(
+                `Batch requests keep failing (HTTP ${res.status}). Progress is saved; press Run scan to resume.`
+              );
+              break;
+            }
+            await sleep(backoff());
+            continue;
+          }
+
+          networkFailures = 0;
           const data = await res.json().catch(() => ({}));
           if (data.job) {
             const j = mapJob(jobId, data.job);
@@ -125,6 +184,7 @@ export function useScannerJob(): UseScannerJobReturn {
               break;
             }
           }
+          if (data.batches) setBatches(mapBatches(data.batches));
 
           if (!data.moreRemaining) break;
 
@@ -132,13 +192,27 @@ export function useScannerJob(): UseScannerJobReturn {
             // Another request holds the lease (e.g. a previous batch still
             // finishing). Wait for it to clear, then retry the same job.
             await pollJob(jobId);
-            await new Promise((r) => setTimeout(r, LEASE_RETRY_MS));
+            await sleep(LEASE_RETRY_MS);
+            continue;
+          }
+
+          if (typeof data.retryAfterMs === "number" && data.retryAfterMs > 0) {
+            // Server classified the failure as transient; back off before
+            // retrying the same checkpoint instead of hammering the API.
+            await sleep(data.retryAfterMs);
           }
         } catch {
           if (signal.aborted) break;
           // Network error — the batch may not have completed. The server-side
           // lease keeps progress safe; retry the same job, never a new one.
-          await new Promise((r) => setTimeout(r, NETWORK_RETRY_MS));
+          networkFailures += 1;
+          if (networkFailures >= MAX_CONSECUTIVE_BATCH_FAILURES) {
+            giveUp(
+              "Lost connection to the server. Progress is saved; press Run scan to resume when you're back online."
+            );
+            break;
+          }
+          await sleep(backoff());
         }
       }
     },
@@ -151,12 +225,50 @@ export function useScannerJob(): UseScannerJobReturn {
       if (j && isTerminal(j.status)) return;
       stopPolling();
       pollRef.current = setInterval(() => pollJob(jobId), POLL_INTERVAL_MS);
+      stopWorker();
       const controller = new AbortController();
       workerAbort.current = controller;
       void driveBatches(jobId, controller.signal);
     },
-    [driveBatches, pollJob, stopPolling]
+    [driveBatches, pollJob, stopPolling, stopWorker]
   );
+
+  // Resume an in-flight job after a refresh/reopen. This only monitors and
+  // drives an EXISTING persisted job — it never creates a new scan.
+  useEffect(() => {
+    if (resumedRef.current) return;
+    resumedRef.current = true;
+    let cancelled = false;
+
+    void (async () => {
+      setResuming(true);
+      try {
+        const res = await fetch("/api/scanner/run", { cache: "no-store" });
+        if (!res.ok || cancelled) return;
+        const data = await res.json().catch(() => ({}));
+        const status = data?.job?.status;
+        if (
+          typeof data?.jobId === "string" &&
+          data.jobId &&
+          (status === "PENDING" || status === "RUNNING")
+        ) {
+          if (cancelled) return;
+          setJob(mapJob(data.jobId, data.job));
+          if (data.batches) setBatches(mapBatches(data.batches));
+          await startJob(data.jobId);
+        }
+      } catch {
+        // Offline — pressing Run scan later resumes the persisted job.
+      } finally {
+        if (!cancelled) setResuming(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      resumedRef.current = false;
+    };
+  }, [startJob]);
 
   const launch = useCallback(
     async (
@@ -210,6 +322,9 @@ export function useScannerJob(): UseScannerJobReturn {
                 startedAt: new Date().toISOString(),
                 completedAt: null,
                 currentStage: null,
+                totalInstruments: 0,
+                processedInstruments: 0,
+                retryCount: 0,
               }
         );
         await startJob(jobId);
@@ -227,6 +342,9 @@ export function useScannerJob(): UseScannerJobReturn {
             startedAt: "",
             completedAt: null,
             currentStage: null,
+            totalInstruments: 0,
+            processedInstruments: 0,
+            retryCount: 0,
           });
         } else {
           setJob((prev) =>
@@ -240,6 +358,9 @@ export function useScannerJob(): UseScannerJobReturn {
                   startedAt: "",
                   completedAt: null,
                   currentStage: null,
+                  totalInstruments: 0,
+                  processedInstruments: 0,
+                  retryCount: 0,
                 }
           );
         }
@@ -254,6 +375,7 @@ export function useScannerJob(): UseScannerJobReturn {
     stopPolling();
     stopWorker();
     setJob(null);
+    setBatches(EMPTY_BATCHES);
   }, [stopPolling, stopWorker]);
 
   useEffect(
@@ -264,5 +386,5 @@ export function useScannerJob(): UseScannerJobReturn {
     [stopPolling, stopWorker]
   );
 
-  return { job, launching, launch, reset };
+  return { job, batches, launching, resuming, launch, reset };
 }

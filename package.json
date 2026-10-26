@@ -12,6 +12,7 @@
     "test:coverage": "jest --coverage",
     "typecheck": "tsc --noEmit",
     "db:migrate": "node db/migrate.js",
+    "db:target": "node db/target.js",
     "db:verify": "node db/verify-schema.js"
   },
   "dependencies": {

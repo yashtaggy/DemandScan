@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Header } from "@/components/header";
 import { useAuth } from "@/hooks/use-auth";
 import { useZones, type ZoneFilters } from "@/hooks/use-zones";
@@ -33,10 +33,21 @@ export default function ScannerPage() {
   const { zones, count, loading, error, refetch } = useZones(
     isAuthenticated ? activeFilters : {}
   );
-  const { job, launching, launch, reset } = useScannerJob();
+  const { job, batches, launching, resuming, launch, reset } = useScannerJob();
 
   const isRunning = job?.status === "RUNNING" || job?.status === "PENDING";
   const totalPages = Math.max(1, Math.ceil(count / PAGE_SIZE));
+
+  // Refresh the persisted zone list once when a scan reaches SUCCESS without
+  // starting another scan or resetting the active filters.
+  const prevStatusRef = useRef<string | null>(null);
+  useEffect(() => {
+    const status = job?.status ?? null;
+    if (status === "SUCCESS" && prevStatusRef.current !== "SUCCESS") {
+      refetch();
+    }
+    prevStatusRef.current = status;
+  }, [job?.status, refetch]);
 
   // ── Drawer ───────────────────────────────────────────────────────────────
   const [selectedZone, setSelectedZone] = useState<Zone | null>(null);
@@ -133,7 +144,12 @@ export default function ScannerPage() {
                   <p className="text-xs text-slate-500 mt-0.5">Filters &amp; scan trigger</p>
                 </div>
 
-                <ScanProgress job={job} launching={launching} />
+                <ScanProgress
+                  job={job}
+                  launching={launching}
+                  batches={batches}
+                  resuming={resuming}
+                />
 
                 {job?.status === "SUCCESS" && (
                   <button
@@ -174,7 +190,7 @@ export default function ScannerPage() {
               </div>
 
               {/* ── Stats card ── */}
-              <StatsCard zones={zones} loading={loading} />
+              <StatsCard zones={zones} loading={loading} total={count} />
             </aside>
 
             {/* ── Right: zone table ── */}
@@ -235,7 +251,7 @@ export default function ScannerPage() {
 }
 
 // ── Mini stats card ────────────────────────────────────────────────────────────
-function StatsCard({ zones, loading }: { zones: Zone[]; loading: boolean }) {
+function StatsCard({ zones, loading, total }: { zones: Zone[]; loading: boolean; total: number }) {
   if (loading || zones.length === 0) return null;
 
   const demand = zones.filter((z) => z.side === "DEMAND").length;
@@ -244,11 +260,16 @@ function StatsCard({ zones, loading }: { zones: Zone[]; loading: boolean }) {
   const avgScore = Math.round(zones.reduce((s, z) => s + z.score, 0) / zones.length);
 
   return (
-    <div className="rounded-xl border border-slate-700/50 bg-slate-800/30 p-4 grid grid-cols-2 gap-3">
-      <Stat label="Demand" value={demand} color="text-emerald-400" />
-      <Stat label="Supply" value={supply} color="text-rose-400" />
-      <Stat label="Fresh" value={fresh} color="text-indigo-400" />
-      <Stat label="Avg Score" value={avgScore} color="text-amber-400" />
+    <div className="rounded-xl border border-slate-700/50 bg-slate-800/30 p-4 space-y-2">
+      <p className="text-[10px] uppercase tracking-wider text-slate-600">
+        This page ({zones.length} of {total} matching)
+      </p>
+      <div className="grid grid-cols-2 gap-3">
+        <Stat label="Demand" value={demand} color="text-emerald-400" />
+        <Stat label="Supply" value={supply} color="text-rose-400" />
+        <Stat label="Fresh" value={fresh} color="text-indigo-400" />
+        <Stat label="Avg Score" value={avgScore} color="text-amber-400" />
+      </div>
     </div>
   );
 }

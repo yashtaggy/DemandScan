@@ -84,13 +84,20 @@ export async function updateZoneLifecycles(
     snapshotMap.set(s.instrumentId, s);
   }
 
-  // Fetch all active (non-broken) zones.
+  // Nothing to evaluate for an empty batch.
+  if (snapshotMap.size === 0) return;
+
+  // Fetch only active (non-broken) zones for this batch's instruments.
+  // Previously every lifecycle batch re-read every non-broken zone in the
+  // database; zones for instruments without a snapshot were skipped anyway.
+  const instrumentIds = [...snapshotMap.keys()];
   const activeZoneRows = await sql`
     SELECT zone_id, instrument_id, side,
            zone_low, zone_high, proximal, distal,
            lifecycle_state, touch_count
     FROM zones
     WHERE lifecycle_state != 'BROKEN'
+      AND instrument_id = ANY(${instrumentIds}::bigint[])
   `;
 
   for (const row of activeZoneRows) {

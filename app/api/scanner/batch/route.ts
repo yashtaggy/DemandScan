@@ -3,7 +3,7 @@ import type { NextRequest } from 'next/server';
 import { getSessionIdFromCookies, requireSession } from '@/lib/kite-session';
 import { hashSessionId } from '@/lib/crypto';
 import { processScanBatch } from '@/lib/scanner/batchRunner';
-import { getScanJob } from '@/lib/scanner/jobs';
+import { getScanBatchStats, getScanJob } from '@/lib/scanner/jobs';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -53,7 +53,10 @@ export async function POST(req: NextRequest) {
     jobId: result.jobId,
     moreRemaining: result.moreRemaining,
     processedInBatch: result.processedInBatch,
+    durationMs: result.durationMs,
     errorMessage: result.errorMessage,
+    retryAfterMs: result.retryAfterMs,
     job,
+    batches: result.jobId ? await getScanBatchStats(result.jobId) : null,
   });
 }

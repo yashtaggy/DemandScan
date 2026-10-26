@@ -2,34 +2,43 @@
 /**
  * DemandScan — Database migration runner
  *
- * Applies db/schema.sql and any additional *.sql files in db/migrations/ to the Neon Postgres database configured via
- * DATABASE_URL in your .env.local file.
+ * Applies db/schema.sql and any additional *.sql files in db/migrations/ to the
+ * Neon Postgres database configured via DATABASE_URL. The URL is read from the
+ * process environment first, then `.env.local` (or the file named by
+ * DB_ENV_FILE). The sanitized target is printed before anything is applied.
  *
  * Usage:
  *   node db/migrate.js
+ *   DB_ENV_FILE=.env.production.local node db/migrate.js
  *
  * This script is IDEMPOTENT — safe to run multiple times. It does NOT drop or truncate any existing tables.
  */
 
 const { readFileSync, readdirSync } = require('fs');
 const { join } = require('path');
-
-// Load .env.local manually for local dev (Neon SDK expects DATABASE_URL)
-try {
-  require('dotenv').config({ path: join(__dirname, '..', '.env.local') });
-} catch {
-  // dotenv not installed or .env.local missing — rely on process.env
-}
+const { loadDatabaseUrl, describeTarget } = require('./target');
 
 async function migrate() {
-  const url = process.env.DATABASE_URL;
+  const { url, source } = loadDatabaseUrl();
   if (!url) {
     console.error(
       'ERROR: DATABASE_URL is not set.\n' +
-        'Add it to .env.local (local) or Vercel environment variables (production).'
+        'Add it to .env.local (local), set DB_ENV_FILE, or pass it inline.'
     );
     process.exit(1);
   }
+
+  let target;
+  try {
+    target = describeTarget(url);
+  } catch (err) {
+    console.error(`ERROR: ${err.message}`);
+    process.exit(1);
+  }
+  console.log(
+    `Database target: host=${target.host} database=${target.database} ` +
+      `sslmode=${target.sslmode} source=${source ?? 'unknown'} (credentials omitted)`
+  );
 
   const { neon } = require('@neondatabase/serverless');
   const sql = neon(url);

@@ -36,7 +36,7 @@ lifecycle, and computes cross-timeframe confluence and opposing-zone risk.
 | **Scanner REST API** | ✅ Phase 8 |
 | **Scanner UI: controls, progress, zone table, drawer** | ✅ Phase 9 |
 | **CSV / JSON export** | ✅ |
-| **Unit + integration test suite (73 tests)** | ✅ Phase 10 |
+| **Unit + integration test suite (242 tests)** | ✅ Phase 10 |
 
 ---
 
@@ -98,19 +98,30 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 1. Go to https://neon.tech → create a free project (choose Asia/Singapore region)
 2. Copy the **Connection string** from the project dashboard
 3. Paste as `DATABASE_URL` in `.env.local`
-4. Run migrations:
+4. Confirm which target is configured (host and database only — credentials are
+   never printed):
+   ```bash
+   npm run db:target
+   ```
+   To check a production target without touching `.env.local`:
+   ```bash
+   DB_ENV_FILE=.env.production.local npm run db:target
+   ```
+5. Run migrations:
    ```bash
    node db/migrate.js
    ```
    The script is **idempotent** — safe to run multiple times, no data is deleted.
-5. Verify the live schema matches what the code expects:
+6. Verify the live schema matches what the code expects:
    ```bash
    node db/verify-schema.js
    ```
    This is a **read-only** check. Run it after every migration and against
    production before deploying — a migration committed to the repo but never
    applied to the live database causes `NeonDbError: column ... does not exist`
-   (HTTP 500) at runtime, which local tests cannot catch.
+   (HTTP 500) at runtime, which local tests cannot catch. `db:target` identifies
+   the configured host/database; it does **not** prove that Vercel Production
+   uses that same database.
 
 ### Schema summary
 
@@ -234,12 +245,23 @@ curl http://localhost:3000/api/scanner/job/<jobId> \
 | Param | Type | Description |
 |---|---|---|
 | `instrumentId` | number | Filter by instrument token |
-| `timeframe` | `1D\|1W\|1M\|3M\|6M\|1Y` | Filter by timeframe |
+| `symbol` | string | Filter by NSE trading symbol (case-insensitive) |
+| `timeframe` | `1H\|4H\|1D\|1W\|1M\|3M\|6M\|1Y` | Filter by timeframe |
 | `side` | `DEMAND\|SUPPLY` | Filter by zone side |
+| `pattern` | `DBR\|RBR\|RBD\|DBD` | Filter by base pattern |
 | `lifecycle` | `CONFIRMED_FRESH\|TOUCHED_ONCE\|RETESTED\|BROKEN` | Filter by lifecycle state |
 | `minScore` | number | Minimum zone score (0–100) |
-| `limit` | number | Max results (default 50) |
+| `minCompositeScore` | number | Minimum composite score (0–100) |
+| `minConfluence` | number | Minimum confluence score (0–100) |
+| `maxOppositionRisk` | number | Maximum opposition risk (0–100) |
+| `maxDistancePct` | number | Maximum distance from current price, percent |
+| `formationFrom` / `formationTo` | `YYYY-MM-DD` | Formation date range |
+| `sort` | `composite_score\|score\|formation_ts\|distance_pct` | Sort column (default `composite_score`) |
+| `dir` | `asc\|desc` | Sort direction (default `desc`) |
+| `limit` | number | Max results (default 100, max 500) |
 | `offset` | number | Pagination offset (default 0) |
+
+Invalid values return `400` with a specific error instead of being silently coerced.
 
 #### `/api/scanner/confluence` query params
 
@@ -361,18 +383,21 @@ commit that adds a file under `db/migrations/`, apply it to the production
 database manually:
 
 ```bash
-DATABASE_URL="postgres://..." node db/migrate.js
+DB_ENV_FILE=.env.production.local npm run db:target
+DB_ENV_FILE=.env.production.local node db/migrate.js
 ```
 
 Then confirm the production schema actually has the new objects (read-only):
 
 ```bash
-DATABASE_URL="postgres://..." node db/verify-schema.js
+DB_ENV_FILE=.env.production.local node db/verify-schema.js
 ```
 
-Until `verify-schema.js` passes, endpoints that rely on the new columns (e.g.
-`POST /api/scanner/run` needs `scan_jobs.session_id_hash`) will fail with
-HTTP 500 in production regardless of local test results.
+`.env.production.local` is git-ignored and must contain the Vercel Production
+`DATABASE_URL`. Confirm the printed host/database is the intended Neon project
+before applying anything. Until `verify-schema.js` passes, endpoints that rely
+on new columns or tables will fail with HTTP 500 in production regardless of
+local test results.
 
 ### Step 4 — Verify build
 
@@ -386,11 +411,15 @@ All three must pass before deploying.
 
 Push a new commit or trigger a manual redeploy in Vercel.
 
-> **Vercel timeout note:** The scanner pipeline is triggered fire-and-forget from
-> the API route. Each API call returns within the 10-second Vercel limit while
-> progress is tracked in the `scan_jobs` table. For long ingestion runs
-> (full Nifty 500, 1 year of history), consider running Step 2 locally:
-> `POST /api/scanner/ingest` with your production `DATABASE_URL`.
+> **Vercel execution model:** There is no cron. `POST /api/scanner/run` creates
+> a resumable job, processes the first bounded batch, and returns a `jobId`.
+> The authenticated browser then calls `POST /api/scanner/batch` repeatedly;
+> each call has a 60-second `maxDuration` and persists its checkpoint.
+> Progress pauses when the tab is closed. Reopening the scanner resumes the
+> same persisted job — it never creates a duplicate. A full Nifty 500 scan
+> spans hundreds of batches and can take a long time; the UI shows persisted
+> progress and per-batch timing. Do not deploy a new full-scan design without a
+> measured authenticated run.
 
 ---
 
@@ -412,17 +441,27 @@ Push a new commit or trigger a manual redeploy in Vercel.
 
 1. **REST polling, not WebSocket tick streaming** — quotes refresh on demand or
    at the configured interval. Not real-time tick-by-tick.
-2. **Nifty 500 constituent list** — curated statically in `lib/nifty500.ts`.
-   Update it after each quarterly NSE reconstitution (March, June, September, December).
+2. **Nifty 500 constituent list** — a curated snapshot of the official NSE
+   `ind_nifty500list.csv` (source URL and retrieval date are recorded in
+   `lib/nifty500.ts`; the raw CSV is kept under `data/nifty500/`). Seeding into
+   `nifty500_membership` is strict: missing, inactive, or ambiguous mappings
+   abort before any membership row changes, and resolution never falls back to
+   the full instrument master. Refresh the snapshot and reconcile it against
+   the active Kite master after each quarterly reconstitution (March, June,
+   September, December) or any ad-hoc index change.
 3. **Market holidays** — the market-open indicator uses clock time only; NSE
    trading holidays are not accounted for.
 4. **Single-user design** — one Zerodha account per deployment.
 5. **Kite API rate limits** — the candle ingestion uses exponential back-off on
    HTTP 429. Keep `concurrency` ≤ 5 for safety.
-6. **Vercel execution limits** — the full scan pipeline is designed to be safe
-   within Vercel's 10-second serverless timeout by returning a `jobId` immediately
-   and tracking progress asynchronously. Very large runs should be triggered from
-   a local machine with a production `DATABASE_URL`.
+6. **Vercel execution limits / browser-driven progress** — a scan is a
+   persisted job advanced one bounded batch per serverless invocation
+   (60-second `maxDuration`). The authenticated browser calls
+   `POST /api/scanner/batch` repeatedly; closing the tab pauses progress and
+   reopening the scanner resumes the same job. A full Nifty 500 scan spans
+   hundreds of batches, so wall-clock duration depends on how long the tab
+   stays open. There is no cron and no background continuation after the tab
+   closes.
 
 ---
 

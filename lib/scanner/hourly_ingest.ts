@@ -20,11 +20,24 @@
 import { getDb } from '../db';
 import { createKiteClient } from '../kite-client';
 import type { KiteSession } from '../types';
+import { bulkUpsert } from './bulk';
+import {
+  backoffMs,
+  isPermanentError,
+  isTransientError,
+  sanitizeErrorMessage,
+  throttleHistoricalRequests,
+} from './retry';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 /** Kite max range for 60-minute interval is 60 days per request. */
 const CHUNK_DAYS = 55; // conservative
+
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+
+const MAX_REQUEST_ATTEMPTS = 5;
 
 /** NSE session boundaries in IST (hours:minutes, 24h) */
 const SESSION_START_H = 9;
@@ -36,6 +49,12 @@ const SESSION_END_M = 30;
 
 function delay(ms: number): Promise<void> {
   return new Promise((res) => setTimeout(res, ms));
+}
+
+function toDate(value: unknown): Date | null {
+  if (value == null) return null;
+  const d = value instanceof Date ? value : new Date(String(value));
+  return Number.isNaN(d.getTime()) ? null : d;
 }
 
 function computeChunkEnd(start: Date, to: Date): Date {
@@ -75,22 +94,37 @@ function toKiteDateStr(d: Date, endOfDay = false): string {
 
 // ─── Checkpoint helpers ───────────────────────────────────────────────────────
 
-async function getCheckpoint(instrumentId: number): Promise<Date | null> {
+interface IngestBounds {
+  /** Latest candle covered by the checkpoint (null on a cold start). */
+  lastCandle: Date | null;
+  /** Earliest hourly candle already stored (null on a cold start). */
+  firstCandle: Date | null;
+}
+
+async function getIngestBounds(instrumentId: number): Promise<IngestBounds> {
   const sql = getDb();
   const rows = await sql`
-    SELECT last_candle_ts FROM hourly_ingestion_checkpoints
-    WHERE instrument_id = ${instrumentId}
+    SELECT
+      (SELECT last_candle_ts FROM hourly_ingestion_checkpoints
+       WHERE instrument_id = ${instrumentId}) AS last_candle_ts,
+      (SELECT MIN(candle_ts) FROM hourly_candles
+       WHERE instrument_id = ${instrumentId}) AS first_candle_ts
   `;
-  return rows.length ? new Date(rows[0].last_candle_ts as string) : null;
+  if (!rows.length) return { lastCandle: null, firstCandle: null };
+  return {
+    lastCandle: toDate(rows[0].last_candle_ts),
+    firstCandle: toDate(rows[0].first_candle_ts),
+  };
 }
 
 async function setCheckpoint(instrumentId: number, lastTs: Date): Promise<void> {
   const sql = getDb();
+  // GREATEST keeps a historical backfill from moving the checkpoint backwards.
   await sql`
     INSERT INTO hourly_ingestion_checkpoints (instrument_id, last_candle_ts, updated_at)
     VALUES (${instrumentId}, ${lastTs}, NOW())
     ON CONFLICT (instrument_id) DO UPDATE SET
-      last_candle_ts = EXCLUDED.last_candle_ts,
+      last_candle_ts = GREATEST(hourly_ingestion_checkpoints.last_candle_ts, EXCLUDED.last_candle_ts),
       updated_at = NOW()
   `;
 }
@@ -123,9 +157,11 @@ async function updateCoverage(instrumentId: number): Promise<void> {
 
 /**
  * Ingest 60-minute historical candles for a single instrument.
- * Idempotent — uses checkpoints; only fetches missing dates.
+ * Idempotent — uses checkpoints; only fetches missing windows, bulk-upserts
+ * rows, retries transient failures with bounded backoff, and fails fast on
+ * permanent errors.
  *
- * @returns number of newly inserted candles
+ * @returns number of candles fetched and upserted
  */
 export async function ingestHourlyCandles(
   session: KiteSession,
@@ -135,86 +171,123 @@ export async function ingestHourlyCandles(
 ): Promise<number> {
   if (fromDate > toDate) throw new Error('fromDate must be <= toDate');
 
-  const checkpoint = await getCheckpoint(instrumentId);
-  // Start from day after last checkpoint, or fromDate, whichever is later
-  let fetchStart = checkpoint
-    ? new Date(Math.max(checkpoint.getTime() + 60 * 60 * 1000, fromDate.getTime()))
-    : fromDate;
+  const startedAt = Date.now();
+  const { lastCandle, firstCandle } = await getIngestBounds(instrumentId);
 
-  if (fetchStart > toDate) return 0;
+  const forwardStart = lastCandle
+    ? new Date(Math.max(lastCandle.getTime() + HOUR_MS, fromDate.getTime()))
+    : firstCandle
+      ? new Date(Math.max(firstCandle.getTime(), fromDate.getTime()))
+      : fromDate;
+
+  const ranges: Array<{ start: Date; end: Date; advanceCheckpoint: boolean }> = [];
+
+  // Historical backfill: a requested range starting before the stored hourly
+  // history. Compare IST calendar days because Kite windows are IST-based.
+  if (firstCandle) {
+    const requestedDay = toKiteDateStr(fromDate).slice(0, 10);
+    const firstStoredDay = toKiteDateStr(firstCandle).slice(0, 10);
+    if (requestedDay < firstStoredDay) {
+      const backfillEnd = new Date(
+        Math.min(toDate.getTime(), firstCandle.getTime() - DAY_MS)
+      );
+      ranges.push({ start: fromDate, end: backfillEnd, advanceCheckpoint: false });
+    }
+  }
+
+  if (forwardStart <= toDate) {
+    ranges.push({ start: forwardStart, end: toDate, advanceCheckpoint: true });
+  }
+
+  if (ranges.length === 0) return 0;
 
   const kc = createKiteClient(session.accessToken);
-  const sql = getDb();
-  let totalInserted = 0;
-  let attempt = 0;
-  const maxAttempts = 5;
+  let totalUpserted = 0;
+  let requests = 0;
 
-  while (fetchStart <= toDate) {
-    const chunkEnd = computeChunkEnd(fetchStart, toDate);
-    const fromStr = toKiteDateStr(fetchStart, false);
-    const toStr   = toKiteDateStr(chunkEnd, true);
+  for (const range of ranges) {
+    let fetchStart = range.start;
+    let attempt = 0;
 
-    try {
-      // kiteconnect v5 API: getHistoricalData(token, interval, from, to).
-      // Returns HistoricalData[] — objects with named fields, not arrays.
-      const raw = await kc.getHistoricalData(instrumentId, '60minute', fromStr, toStr);
+    while (fetchStart <= range.end) {
+      const chunkEnd = computeChunkEnd(fetchStart, range.end);
+      const fromStr = toKiteDateStr(fetchStart, false);
+      const toStr   = toKiteDateStr(chunkEnd, true);
 
-      const sql2 = getDb();
-      let chunkInserted = 0;
+      await throttleHistoricalRequests();
+      requests++;
 
-      for (const row of raw) {
-        const candleTs = new Date(row.date);
-        const withinSession = isWithinSession(candleTs);
-
-        await sql2`
-          INSERT INTO hourly_candles (
-            instrument_id, candle_ts, open, high, low, close, volume,
-            is_session_complete, source
-          ) VALUES (
-            ${instrumentId},
-            ${candleTs},
-            ${Number(row.open)}, ${Number(row.high)}, ${Number(row.low)}, ${Number(row.close)},
-            ${Number(row.volume)},
-            ${withinSession},
-            'kite'
-          )
-          ON CONFLICT (instrument_id, candle_ts) DO UPDATE SET
-            open  = EXCLUDED.open,
-            high  = EXCLUDED.high,
-            low   = EXCLUDED.low,
-            close = EXCLUDED.close,
-            volume = EXCLUDED.volume,
-            is_session_complete = EXCLUDED.is_session_complete,
-            source = EXCLUDED.source
-        `;
-        chunkInserted++;
+      let raw: Awaited<ReturnType<typeof kc.getHistoricalData>>;
+      try {
+        // kiteconnect v5: getHistoricalData(token, interval, from, to).
+        raw = await kc.getHistoricalData(instrumentId, '60minute', fromStr, toStr);
+      } catch (err) {
+        if (isPermanentError(err) || !isTransientError(err) || attempt >= MAX_REQUEST_ATTEMPTS) {
+          throw err;
+        }
+        await delay(backoffMs(attempt));
+        attempt++;
+        continue;
       }
 
-      totalInserted += chunkInserted;
+      const rows = raw.map((row) => {
+        const candleTs = new Date(row.date);
+        return [
+          instrumentId,
+          candleTs,
+          Number(row.open),
+          Number(row.high),
+          Number(row.low),
+          Number(row.close),
+          Number(row.volume),
+          isWithinSession(candleTs),
+          'kite',
+        ];
+      });
 
-      if (raw.length > 0) {
+      totalUpserted += await bulkUpsert({
+        table: 'hourly_candles',
+        columns: [
+          'instrument_id',
+          'candle_ts',
+          'open',
+          'high',
+          'low',
+          'close',
+          'volume',
+          'is_session_complete',
+          'source',
+        ],
+        rows,
+        conflictClause: `ON CONFLICT (instrument_id, candle_ts) DO UPDATE SET
+        open  = EXCLUDED.open,
+        high  = EXCLUDED.high,
+        low   = EXCLUDED.low,
+        close  = EXCLUDED.close,
+        volume = EXCLUDED.volume,
+        is_session_complete = EXCLUDED.is_session_complete,
+        source = EXCLUDED.source`,
+      });
+
+      // Backfill chunks must not touch the forward checkpoint.
+      if (range.advanceCheckpoint && raw.length > 0) {
         await setCheckpoint(instrumentId, new Date(raw[raw.length - 1].date));
       }
 
-      fetchStart = new Date(chunkEnd.getTime() + 24 * 60 * 60 * 1000);
+      fetchStart = new Date(chunkEnd.getTime() + DAY_MS);
       attempt = 0;
-    } catch (err: any) {
-      const message = String(err?.message ?? "");
-      const isRateLimit =
-        err?.statusCode === 429 ||
-        /rate limit|too many requests/i.test(message);
-      if (isRateLimit && attempt < maxAttempts) {
-        const backoff = Math.pow(2, attempt) * 1000 + Math.random() * 500;
-        attempt++;
-        await delay(backoff);
-        continue;
-      }
-      throw err;
     }
   }
 
   await updateCoverage(instrumentId);
-  return totalInserted;
+
+  console.info(
+    `[hourly_ingest] 1H instrument=${instrumentId} requests=${requests} ` +
+      `candles=${totalUpserted} backfill=${ranges.some((r) => !r.advanceCheckpoint)} ` +
+      `durationMs=${Date.now() - startedAt}`
+  );
+
+  return totalUpserted;
 }
 
 /**
@@ -233,16 +306,37 @@ export async function ingestAllHourlyCandles(
   const ids: number[] = rows.map((r: any) => Number(r.instrument_id));
 
   let total = 0;
+  const failures: Array<{ instrumentId: number; message: string }> = [];
+  let permanentFailure: unknown = null;
   const pool = new Set<Promise<void>>();
 
   for (const id of ids) {
-    const p: Promise<void> = ingestHourlyCandles(session, id, fromDate, toDate)
-      .then((n) => { total += n; })
-      .catch((err) => console.error(`[hourly_ingest] ${id} failed:`, err))
+    const p: Promise<void> = (async () => {
+      if (permanentFailure) return;
+      try {
+        total += await ingestHourlyCandles(session, id, fromDate, toDate);
+      } catch (err) {
+        failures.push({ instrumentId: id, message: sanitizeErrorMessage(err) });
+        if (isPermanentError(err) && permanentFailure == null) permanentFailure = err;
+      }
+    })()
       .finally(() => pool.delete(p));
     pool.add(p);
     if (pool.size >= concurrency) await Promise.race(pool);
   }
   await Promise.all(pool);
+
+  // A partial hourly ingest must not be reported as success.
+  if (permanentFailure) throw permanentFailure;
+  if (failures.length > 0) {
+    const sample = failures
+      .slice(0, 5)
+      .map((f) => `${f.instrumentId}: ${f.message}`)
+      .join('; ');
+    throw new Error(
+      `${failures.length}/${ids.length} instrument(s) failed hourly ingestion: ${sample}`
+    );
+  }
+
   return total;
 }

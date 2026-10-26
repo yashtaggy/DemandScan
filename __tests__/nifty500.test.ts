@@ -24,14 +24,16 @@ describe("Nifty500 constituent list", () => {
     }
   });
 
-  it("count is positive", () => {
-    expect(getNifty500Count()).toBeGreaterThan(0);
+  it("contains exactly the 500 official tradeable constituents", () => {
+    expect(getNifty500Count()).toBe(500);
+    // NSE includes a DUMMYHEG placeholder row in the CSV; it is not tradeable.
+    expect(getNifty500FullSymbols()).not.toContain("NSE:DUMMYHEG");
   });
 
-  it("includes known blue-chip stocks", () => {
+  it("includes known blue-chip stocks under their official NSE symbols", () => {
     const symbols = getNifty500FullSymbols();
     expect(symbols).toContain("NSE:RELIANCE");
-    expect(symbols).toContain("NSE:INFOSYS");
+    expect(symbols).toContain("NSE:INFY");
     expect(symbols).toContain("NSE:TCS");
     expect(symbols).toContain("NSE:HDFCBANK");
   });

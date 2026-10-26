@@ -23,12 +23,15 @@ import { ingestAllInstruments } from './ingest_all';
 import { ingestAllHourlyCandles } from './hourly_ingest';
 import { aggregate4HForAll } from './four_hour_agg';
 import { aggregateAllTimeframes } from './aggregation';
-import { detectPatternsForInstrument } from './patterns';
+import { detectPatterns, fetchCandlesForTimeframe } from './patterns';
 import { upsertZone } from './zones';
 import { updateZoneLifecycles, buildLatestSnapshots } from './lifecycle';
 import { updateScanJob } from './jobs';
+import { assertUniversePlayable, listNifty500InstrumentIds } from './universe';
+import { getNifty500Count } from '@/lib/nifty500';
+import { sanitizeErrorMessage } from './retry';
 import { DEFAULT_SCANNER_CONFIG } from './types';
-import type { ScannerConfig, Timeframe, Candle } from './types';
+import type { ScannerConfig, Timeframe } from './types';
 
 export interface OrchestratorOptions {
   jobId: string;
@@ -43,26 +46,113 @@ export interface OrchestratorOptions {
 
 const SCAN_TIMEFRAMES: Timeframe[] = ['1H', '4H', '1D', '1W', '1M', '3M', '6M', '1Y'];
 
+export type TimeframeDetectionStatus = 'OK' | 'NO_DATA' | 'FAILED';
+
+export interface TimeframeDetectionOutcome {
+  timeframe: Timeframe;
+  status: TimeframeDetectionStatus;
+  candles: number;
+  matches: number;
+  durationMs: number;
+  /** Sanitized failure detail; present only when status is FAILED. */
+  errorMessage?: string;
+}
+
+export interface InstrumentDetectionResult {
+  instrumentId: number;
+  outcomes: TimeframeDetectionOutcome[];
+  failedTimeframes: Timeframe[];
+  durationMs: number;
+}
+
 /**
  * Detect patterns and upsert zones for one instrument across all 8 timeframes.
  * Preserves existing detection, scoring, and upsert behaviour.
+ *
+ * Every timeframe is attempted and reported as OK, NO_DATA, or FAILED. The
+ * whole instrument is reported as failed if any timeframe failed, so callers
+ * cannot mark a scan SUCCESS while a timeframe was never processed.
  */
 export async function detectAndUpsertZonesForInstrument(
   instrumentId: number,
   config: ScannerConfig = DEFAULT_SCANNER_CONFIG
-): Promise<void> {
-  const sql = getDb();
+): Promise<InstrumentDetectionResult> {
+  const startedAt = Date.now();
+  const outcomes: TimeframeDetectionOutcome[] = [];
+
   for (const tf of SCAN_TIMEFRAMES) {
+    const timeframeStartedAt = Date.now();
     try {
-      const matches = await detectPatternsForInstrument(instrumentId, tf, config);
-      const candles = await fetchCandlesForZoneScoring(instrumentId, tf, sql);
+      // One fetch per timeframe: detection and zone scoring must use the
+      // exact same candle window (they previously fetched it twice).
+      const candles = await fetchCandlesForTimeframe(instrumentId, tf);
+      if (candles.length === 0) {
+        outcomes.push({
+          timeframe: tf,
+          status: 'NO_DATA',
+          candles: 0,
+          matches: 0,
+          durationMs: Date.now() - timeframeStartedAt,
+        });
+        continue;
+      }
+
+      const matches = detectPatterns(candles, instrumentId, tf, config);
       for (const match of matches) {
         await upsertZone(match, candles, config, config.version);
       }
+      outcomes.push({
+        timeframe: tf,
+        status: 'OK',
+        candles: candles.length,
+        matches: matches.length,
+        durationMs: Date.now() - timeframeStartedAt,
+      });
     } catch (err) {
-      console.error(`[orchestrator] pattern detection failed for ${instrumentId}/${tf}:`, err);
+      const errorMessage = sanitizeErrorMessage(err);
+      outcomes.push({
+        timeframe: tf,
+        status: 'FAILED',
+        candles: 0,
+        matches: 0,
+        durationMs: Date.now() - timeframeStartedAt,
+        errorMessage,
+      });
+      console.error(
+        `[orchestrator] detection failed instrument=${instrumentId} timeframe=${tf} error=${errorMessage}`
+      );
     }
   }
+
+  const failedTimeframes = outcomes
+    .filter((o) => o.status === 'FAILED')
+    .map((o) => o.timeframe);
+  const result: InstrumentDetectionResult = {
+    instrumentId,
+    outcomes,
+    failedTimeframes,
+    durationMs: Date.now() - startedAt,
+  };
+
+  // Explicit per-instrument summary. Sanitized: no candle values or secrets.
+  console.info(
+    `[orchestrator] detect instrument=${instrumentId} ` +
+      `timeframes=${outcomes.map((o) => `${o.timeframe}:${o.status}`).join(',')} ` +
+      `matches=${outcomes.reduce((sum, o) => sum + o.matches, 0)} ` +
+      `failed=${failedTimeframes.length} durationMs=${result.durationMs}`
+  );
+
+  if (failedTimeframes.length > 0) {
+    const details = outcomes
+      .filter((o) => o.status === 'FAILED')
+      .map((o) => `${o.timeframe}=${o.errorMessage}`)
+      .join('; ');
+    throw new Error(
+      `Pattern detection failed for instrument ${instrumentId} on ${failedTimeframes.join(', ')}: ${details}`
+    );
+  }
+
+  return result;
 }
 
 /**
@@ -105,20 +195,19 @@ export async function runFullScan(opts: OrchestratorOptions): Promise<void> {
     await updateScanJob(jobId, { progressPercent: 55 });
 
     // ── Step 4 & 5: Pattern detection + zone upsert ───────────────────────────
-    let instrumentRows;
+    let ids: number[];
     if (limitToIds && limitToIds.length > 0) {
-      instrumentRows = await sql`
+      const instrumentRows = await sql`
         SELECT instrument_id FROM instruments
         WHERE active = true AND instrument_id = ANY(${limitToIds}::bigint[])
         ORDER BY instrument_id
       `;
+      ids = instrumentRows.map((r: any) => Number(r.instrument_id));
     } else {
-      instrumentRows = await sql`
-        SELECT instrument_id FROM instruments WHERE active = true ORDER BY instrument_id
-      `;
+      // A full scan is membership-only. Never use every active instrument.
+      ids = await listNifty500InstrumentIds();
+      assertUniversePlayable(ids.length, getNifty500Count());
     }
-
-    const ids: number[] = instrumentRows.map((r: any) => Number(r.instrument_id));
     const total = ids.length;
     let processed = 0;
 
@@ -143,74 +232,12 @@ export async function runFullScan(opts: OrchestratorOptions): Promise<void> {
       completedAt: new Date(),
     });
   } catch (err: any) {
-    console.error('[orchestrator] full scan failed:', err);
+    const message = sanitizeErrorMessage(err);
+    console.error(`[orchestrator] full scan failed: jobId=${jobId} error=${message}`);
     await updateScanJob(jobId, {
       status: 'FAILED',
-      errorMessage: err?.message ?? 'Unknown error',
+      errorMessage: message,
       completedAt: new Date(),
     });
   }
-}
-
-// ─── Internal candle fetch helper ─────────────────────────────────────────────
-
-/** Fetch candles for zone scoring — all 8 timeframes. */
-async function fetchCandlesForZoneScoring(
-  instrumentId: number,
-  timeframe: Timeframe,
-  sql: ReturnType<typeof getDb>
-): Promise<Candle[]> {
-  let rows: any[];
-
-  if (timeframe === '1H') {
-    rows = await sql`
-      SELECT instrument_id AS instrument_token,
-             candle_ts     AS period_start,
-             open, high, low, close, volume
-      FROM hourly_candles
-      WHERE instrument_id       = ${instrumentId}
-        AND is_session_complete = TRUE
-      ORDER BY candle_ts ASC LIMIT 500
-    `;
-  } else if (timeframe === '4H') {
-    rows = await sql`
-      SELECT instrument_id AS instrument_token,
-             session_ts    AS period_start,
-             open, high, low, close, volume
-      FROM four_hour_candles
-      WHERE instrument_id = ${instrumentId}
-        AND is_complete   = TRUE
-      ORDER BY session_ts ASC LIMIT 500
-    `;
-  } else if (timeframe === '1D') {
-    rows = await sql`
-      SELECT instrument_id AS instrument_token,
-             candle_date   AS period_start,
-             open, high, low, close, volume
-      FROM daily_candles
-      WHERE instrument_id = ${instrumentId}
-      ORDER BY candle_date ASC LIMIT 500
-    `;
-  } else {
-    rows = await sql`
-      SELECT instrument_token, period_start,
-             open, high, low, close, volume
-      FROM aggregated_candles
-      WHERE instrument_token = ${instrumentId}
-        AND timeframe        = ${timeframe}
-      ORDER BY period_start ASC LIMIT 500
-    `;
-  }
-
-  return rows.map((r: any): Candle => ({
-    instrumentId: Number(r.instrument_token),
-    date: new Date(r.period_start),
-    open: Number(r.open),
-    high: Number(r.high),
-    low: Number(r.low),
-    close: Number(r.close),
-    volume: Number(r.volume),
-    source: 'db',
-    isComplete: true,
-  }));
 }

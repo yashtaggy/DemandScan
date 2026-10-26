@@ -16,12 +16,9 @@
  * Exit code 0 = schema matches, 1 = missing objects or connection error.
  */
 
-// Load .env.local manually for local dev (same behaviour as db/migrate.js)
-try {
-  require('dotenv').config({ path: require('path').join(__dirname, '..', '.env.local') });
-} catch {
-  // dotenv not installed or .env.local missing — rely on process.env
-}
+// Load DATABASE_URL from the process environment or .env.local (or DB_ENV_FILE).
+// db/target.js never prints credentials, only the sanitized target.
+const { loadDatabaseUrl, describeTarget } = require('./target');
 
 /**
  * The schema contract the current code requires.
@@ -31,7 +28,7 @@ try {
 const { EXPECTED_SCHEMA } = require('./expected-schema');
 
 async function main() {
-  const url = process.env.DATABASE_URL;
+  const { url, source } = loadDatabaseUrl();
   if (!url) {
     console.error(
       'ERROR: DATABASE_URL is not set.\n' +
@@ -40,6 +37,12 @@ async function main() {
     );
     process.exit(1);
   }
+
+  const target = describeTarget(url);
+  console.log(
+    `Database target: host=${target.host} database=${target.database} ` +
+      `sslmode=${target.sslmode} source=${source ?? 'unknown'} (credentials omitted)`
+  );
 
   const { neon } = require('@neondatabase/serverless');
   const sql = neon(url);

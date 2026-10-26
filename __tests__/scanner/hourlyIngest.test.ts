@@ -34,6 +34,7 @@ const hourlyCandles = new Map<string, any>();
 const checkpoints = new Map<number, Date>();
 const coverage = new Map<string, any>();
 const missingTables = new Set<string>();
+let firstStoredHourly: Date | string | null = null;
 
 jest.mock("@/lib/db", () => ({
   getDb: () => {
@@ -56,7 +57,10 @@ jest.mock("@/lib/db", () => ({
       if (query.includes("hourly_ingestion_checkpoints")) {
         if (query.includes("SELECT")) {
           const cp = checkpoints.get(values[0] as number);
-          return cp ? [{ last_candle_ts: cp }] : [];
+          return [{
+            last_candle_ts: cp ?? null,
+            first_candle_ts: firstStoredHourly,
+          }];
         }
         // INSERT ... ON CONFLICT
         checkpoints.set(values[0] as number, values[1] as Date);
@@ -86,6 +90,34 @@ jest.mock("@/lib/db", () => ({
           source: "kite",
         });
         return [];
+      }
+      return [];
+    };
+
+    (sql as any).query = async (text: string, params: unknown[]) => {
+      for (const table of missingTables) {
+        if (text.includes(table)) {
+          const err: any = new Error(`relation "${table}" does not exist`);
+          err.code = "42P01";
+          throw err;
+        }
+      }
+      if (text.includes("INSERT INTO hourly_candles")) {
+        // 9 bind params per row.
+        for (let i = 0; i + 8 < params.length; i += 9) {
+          const key = `${params[i]}:${(params[i + 1] as Date).toISOString()}`;
+          hourlyCandles.set(key, {
+            instrumentId: params[i],
+            candleTs: params[i + 1],
+            open: params[i + 2],
+            high: params[i + 3],
+            low: params[i + 4],
+            close: params[i + 5],
+            volume: params[i + 6],
+            isSessionComplete: params[i + 7],
+            source: params[i + 8],
+          });
+        }
       }
       return [];
     };
@@ -119,6 +151,7 @@ beforeEach(() => {
   checkpoints.clear();
   coverage.clear();
   missingTables.clear();
+  firstStoredHourly = null;
 });
 
 describe("ingestHourlyCandles — kiteconnect v5 getHistoricalData", () => {
@@ -227,6 +260,28 @@ describe("ingestHourlyCandles — kiteconnect v5 getHistoricalData", () => {
 
     expect(inserted).toBe(0);
     expect(getHistoricalData).not.toHaveBeenCalled();
+  });
+
+  test("backfills hourly history older than the stored range instead of skipping it", async () => {
+    checkpoints.set(INSTRUMENT_ID, new Date("2025-06-01T00:00:00Z"));
+    firstStoredHourly = "2025-01-01T03:45:00Z"; // 09:15 IST
+    getHistoricalData.mockResolvedValue([]);
+
+    await ingestHourlyCandles(
+      session,
+      INSTRUMENT_ID,
+      new Date("2024-01-01T00:00:00Z"),
+      new Date("2025-06-02T00:00:00Z")
+    );
+
+    // Seven 55-day backfill chunks for 2024, then one forward chunk.
+    expect(getHistoricalData).toHaveBeenCalledTimes(8);
+    expect(getHistoricalData.mock.calls[0][2]).toBe("2024-01-01 09:15:00");
+    expect(getHistoricalData.mock.calls[6][3]).toBe("2024-12-31 15:30:00");
+    expect(getHistoricalData.mock.calls[7][2]).toBe("2025-06-01 09:15:00");
+    expect(checkpoints.get(INSTRUMENT_ID)?.toISOString()).toBe(
+      new Date("2025-06-01T00:00:00Z").toISOString()
+    );
   });
 
   test("propagates the real Postgres 42P01 missing-relation error (the production failure)", async () => {

@@ -197,6 +197,74 @@ export async function getScanJob(jobId: string): Promise<any> {
   return rows.length ? rows[0] : null;
 }
 
+export interface ScanStageBatchStats {
+  stage: ScanStage;
+  total: number;
+  completed: number;
+  failed: number;
+  avgDurationMs: number;
+  maxDurationMs: number;
+}
+
+export interface ScanBatchStats {
+  total: number;
+  completed: number;
+  failed: number;
+  /** Mean wall-clock duration of finished batches, in milliseconds. */
+  avgDurationMs: number;
+  /** Longest finished batch, useful for spotting 60s budget overruns. */
+  maxDurationMs: number;
+  /** Same counters grouped by stage, for locating slow parts of a job. */
+  byStage: ScanStageBatchStats[];
+}
+
+/** Persisted batch counters for progress reporting. */
+export async function getScanBatchStats(jobId: string): Promise<ScanBatchStats> {
+  const sql = getDb();
+  // GROUPING SETS returns one overall row (stage NULL) plus one row per stage
+  // in a single round trip, so progress polling does not add a second query.
+  const rows = await sql`
+    SELECT
+      stage,
+      COUNT(*)::int AS total,
+      COUNT(*) FILTER (WHERE status = 'SUCCESS')::int AS completed,
+      COUNT(*) FILTER (WHERE status = 'FAILED')::int AS failed,
+      COALESCE(
+        AVG(EXTRACT(EPOCH FROM (completed_at - started_at)) * 1000)
+          FILTER (WHERE completed_at IS NOT NULL),
+        0
+      )::int AS avg_duration_ms,
+      COALESCE(
+        MAX(EXTRACT(EPOCH FROM (completed_at - started_at)) * 1000)
+          FILTER (WHERE completed_at IS NOT NULL),
+        0
+      )::int AS max_duration_ms
+    FROM scan_job_batches
+    WHERE job_id = ${jobId}
+    GROUP BY GROUPING SETS ((), (stage))
+    ORDER BY stage NULLS FIRST
+  `;
+  const overall = rows.find((r: any) => r.stage == null) ?? {};
+  const byStage = rows
+    .filter((r: any) => r.stage != null)
+    .map((r: any) => ({
+      stage: r.stage as ScanStage,
+      total: Number(r.total ?? 0),
+      completed: Number(r.completed ?? 0),
+      failed: Number(r.failed ?? 0),
+      avgDurationMs: Number(r.avg_duration_ms ?? 0),
+      maxDurationMs: Number(r.max_duration_ms ?? 0),
+    }));
+  return {
+    total: Number(overall.total ?? 0),
+    completed: Number(overall.completed ?? 0),
+    failed: Number(overall.failed ?? 0),
+    avgDurationMs: Number(overall.avg_duration_ms ?? 0),
+    maxDurationMs: Number(overall.max_duration_ms ?? 0),
+    byStage,
+  };
+}
+
 export async function findActiveScanJob(
   sessionIdHash?: string
 ): Promise<ScanJobRow | null> {
@@ -207,19 +275,73 @@ export async function findActiveScanJob(
       SELECT * FROM scan_jobs
       WHERE status IN ('PENDING', 'RUNNING')
         AND session_id_hash = ${sessionIdHash}
-      ORDER BY started_at ASC
+      ORDER BY started_at DESC
       LIMIT 1
     `;
   } else {
     rows = await sql`
       SELECT * FROM scan_jobs
       WHERE status IN ('PENDING', 'RUNNING')
-      ORDER BY started_at ASC
+      ORDER BY started_at DESC
       LIMIT 1
     `;
   }
   return rows.length ? mapScanJobRow(rows[0]) : null;
 }
+
+/** Age after which an abandoned job (no live lease) is retired. */
+export const STALE_JOB_AFTER_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Mark abandoned scan jobs as FAILED so they cannot be resumed forever.
+ *
+ * A job is abandoned when it is still PENDING/RUNNING, no worker holds a live
+ * lease, and it started more than 24h ago. Job rows from older deployments can
+ * otherwise be picked up by the browser's auto-resume and run with an outdated
+ * universe. Only job lifecycle columns are touched; zones and candles are
+ * never modified.
+ */
+export async function retireStaleScanJobs(
+  sessionIdHash?: string
+): Promise<number> {
+  const sql = getDb();
+  const cutoff = new Date(Date.now() - STALE_JOB_AFTER_MS);
+  const message =
+    'Abandoned: no scan progress for over 24 hours. Start a new scan.';
+
+  const rows = sessionIdHash
+    ? await sql`
+        UPDATE scan_jobs
+        SET status          = 'FAILED',
+            completed_at    = NOW(),
+            error_message   = ${message},
+            lease_owner     = NULL,
+            lease_expires_at = NULL
+        WHERE status IN ('PENDING', 'RUNNING')
+          AND session_id_hash = ${sessionIdHash}
+          AND started_at < ${cutoff}
+          AND (lease_expires_at IS NULL OR lease_expires_at < NOW())
+        RETURNING job_id
+      `
+    : await sql`
+        UPDATE scan_jobs
+        SET status          = 'FAILED',
+            completed_at    = NOW(),
+            error_message   = ${message},
+            lease_owner     = NULL,
+            lease_expires_at = NULL
+        WHERE status IN ('PENDING', 'RUNNING')
+          AND started_at < ${cutoff}
+          AND (lease_expires_at IS NULL OR lease_expires_at < NOW())
+        RETURNING job_id
+      `;
+
+  if (rows.length > 0) {
+    console.warn(`[scanner] retired ${rows.length} abandoned scan job(s)`);
+  }
+  return rows.length;
+}
+
 
 /**
  * Atomically claim a job for one worker. Returns null if another worker holds
@@ -246,7 +368,7 @@ export async function claimScanJob(opts: {
           lease_expires_at = ${leaseExpires}
         WHERE job_id = ${opts.jobId}
           AND status IN ('PENDING', 'RUNNING')
-          AND session_id_hash = ${opts.sessionIdHash}
+          AND (session_id_hash = ${opts.sessionIdHash} OR session_id_hash IS NULL)
           AND (lease_expires_at IS NULL OR lease_expires_at < NOW())
         RETURNING *
       `;
