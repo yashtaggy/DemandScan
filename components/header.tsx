@@ -56,6 +56,7 @@ export function Header({ lastRefreshed }: { lastRefreshed: string | null }) {
           <nav className="hidden md:flex items-center gap-1">
             <NavLink href="/" active={pathname === "/"}>Dashboard</NavLink>
             <NavLink href="/scanner" active={pathname === "/scanner"}>Scanner</NavLink>
+            <NavLink href="/live-trade" active={pathname === "/live-trade"}>Live Trade</NavLink>
           </nav>
 
           {/* Center status row */}
@@ -119,6 +120,16 @@ export function Header({ lastRefreshed }: { lastRefreshed: string | null }) {
             )}
           </div>
         </div>
+
+        {/* Mobile nav */}
+        <nav
+          className="flex items-center gap-1 overflow-x-auto pb-2 md:hidden"
+          aria-label="Primary"
+        >
+          <NavLink href="/" active={pathname === "/"}>Dashboard</NavLink>
+          <NavLink href="/scanner" active={pathname === "/scanner"}>Scanner</NavLink>
+          <NavLink href="/live-trade" active={pathname === "/live-trade"}>Live Trade</NavLink>
+        </nav>
       </div>
     </header>
   );

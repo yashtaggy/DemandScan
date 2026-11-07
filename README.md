@@ -123,6 +123,122 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
    the configured host/database; it does **not** prove that Vercel Production
    uses that same database.
 
+### Staging environment (isolated Neon project)
+
+Staging uses two separate files stored **outside the repository**. Never edit
+`.env.local` for staging and never point these files at production.
+
+| Variable | File contents | Used by |
+|---|---|---|
+| `STAGING_MIGRATE_ENV` | direct (non-pooled) Neon `DATABASE_URL` | preflight + migrations |
+| `STAGING_RUNTIME_ENV` | pooled Neon `DATABASE_URL`, `KITE_TOKEN_ENCRYPTION_KEY`, optional Kite/app vars | app, integration tests |
+
+```bash
+# ~/.config/demandscan/staging-migrate.env
+# DATABASE_URL=postgresql://...@ep-<id>.<region>.aws.neon.tech/<db>?sslmode=require
+
+# ~/.config/demandscan/staging-runtime.env
+# DATABASE_URL=postgresql://...@ep-<id>-pooler.<region>.aws.neon.tech/<db>?sslmode=require
+# KITE_TOKEN_ENCRYPTION_KEY=<64 hex characters, staging-only>
+# NEXT_PUBLIC_APP_URL=http://localhost:3000
+```
+
+The guard requires both `EXPECTED_STAGING_HOST` (the direct Neon hostname) and
+`FORBIDDEN_DATABASE_HOST` (the production hostname). It rejects pooled URLs for
+migrations, direct URLs for runtime, host mismatches, the forbidden host, an
+ambiguous `DATABASE_URL` in the process environment, and any env file inside the
+repository. It never falls back to `.env.local` and prints only host/database
+metadata.
+
+```bash
+# Read-only preflight: target + prerequisites + Live Trade table state
+STAGING_MIGRATE_ENV="$HOME/.config/demandscan/staging-migrate.env" \
+EXPECTED_STAGING_HOST="ep-<id>.<region>.aws.neon.tech" \
+FORBIDDEN_DATABASE_HOST="<production-host>" \
+npm run db:staging:preflight
+
+# Guarded migration (preflight must pass; delegates to db/migrate.js unmodified)
+STAGING_MIGRATE_ENV="$HOME/.config/demandscan/staging-migrate.env" \
+EXPECTED_STAGING_HOST="ep-<id>.<region>.aws.neon.tech" \
+FORBIDDEN_DATABASE_HOST="<production-host>" \
+npm run db:staging:migrate
+
+# Guarded read-only schema check against staging (same checks as db:verify)
+STAGING_MIGRATE_ENV="$HOME/.config/demandscan/staging-migrate.env" \
+EXPECTED_STAGING_HOST="ep-<id>.<region>.aws.neon.tech" \
+FORBIDDEN_DATABASE_HOST="<production-host>" \
+npm run db:staging:verify
+
+# App against staging
+STAGING_RUNTIME_ENV="$HOME/.config/demandscan/staging-runtime.env" \
+EXPECTED_STAGING_HOST="ep-<id>.<region>.aws.neon.tech" \
+FORBIDDEN_DATABASE_HOST="<production-host>" \
+npm run dev:staging
+
+# Real-Neon integration tests (separate from the default suite)
+STAGING_RUNTIME_ENV="$HOME/.config/demandscan/staging-runtime.env" \
+EXPECTED_STAGING_HOST="ep-<id>.<region>.aws.neon.tech" \
+FORBIDDEN_DATABASE_HOST="<production-host>" \
+RUN_STAGING_INTEGRATION=1 \
+npm run test:staging
+```
+
+The default `npm test` suite never discovers `tests/staging/*.integration.ts`.
+Staging tests use reserved synthetic instrument IDs, `ZZTEST`-prefixed symbols,
+run-scoped owners, and delete only the rows they created.
+
+### Production Live Trade migration (explicit approval required)
+
+The Live Trade tables are added to the existing production database through a
+dedicated, guarded command set. These commands apply **only**
+`db/migrations/2026-11-06-add-live-trade.sql` — never `db/schema.sql`, never
+`db/migrate.js`, and never any other migration file.
+
+The production connection string is read from a file **outside** the repository
+(create it manually; it is never committed):
+
+```bash
+# ~/.config/demandscan/production-migrate.env
+# DATABASE_URL=postgresql://...@ep-<id>.<region>.aws.neon.tech/<db>?sslmode=require
+```
+
+| Variable | Purpose |
+|---|---|
+| `PRODUCTION_MIGRATE_ENV` | path to the production env file (must be outside the repo) |
+| `EXPECTED_PRODUCTION_HOST` | direct (non-pooled) production Neon hostname |
+| `ALLOW_LIVE_TRADE_PRODUCTION_MIGRATION=YES` | write approval, required before any statement |
+
+The production guard rejects a missing/inside-repo env file, an inherited
+`DATABASE_URL`, `DB_ENV_FILE`, a staging file reused as the production file, a
+pooled or non-Neon URL, a hostname that does not match
+`EXPECTED_PRODUCTION_HOST`, and an expected host equal to
+`EXPECTED_STAGING_HOST`. Read-only commands never need the approval flag. It
+prints only host/database metadata, never credentials.
+
+```bash
+# 1. Read-only preflight — target, prerequisites, Live Trade state (exit 2 = blocked)
+PRODUCTION_MIGRATE_ENV="$HOME/.config/demandscan/production-migrate.env" \
+EXPECTED_PRODUCTION_HOST="ep-<id>.<region>.aws.neon.tech" \
+npm run db:production:live-trade:preflight
+
+# 2. Apply ONLY the Live Trade migration (requires the approval flag)
+PRODUCTION_MIGRATE_ENV="$HOME/.config/demandscan/production-migrate.env" \
+EXPECTED_PRODUCTION_HOST="ep-<id>.<region>.aws.neon.tech" \
+ALLOW_LIVE_TRADE_PRODUCTION_MIGRATION=YES \
+npm run db:production:live-trade:migrate
+
+# 3. Read-only verification of the three Live Trade tables
+PRODUCTION_MIGRATE_ENV="$HOME/.config/demandscan/production-migrate.env" \
+EXPECTED_PRODUCTION_HOST="ep-<id>.<region>.aws.neon.tech" \
+npm run db:production:live-trade:verify
+```
+
+Statements run in autocommit, exactly like `db/migrate.js`, so a mid-file
+failure can leave earlier statements committed; the command reports the failed
+statement number and never claims a rollback. `db:verify`, `db:migrate` and all
+staging commands are unchanged. The full procedure, stop conditions and recovery
+steps are in `docs/live-trade-production-checklist.md`.
+
 ### Schema summary
 
 | Table | Purpose |

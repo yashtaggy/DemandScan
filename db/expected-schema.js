@@ -199,6 +199,40 @@ const EXPECTED_SCHEMA = {
     'started_at',
     'completed_at',
   ],
+
+  // 2026-11-06-add-live-trade.sql
+  live_trade_groups: [
+    'group_id',
+    'owner_user_id',
+    'name',
+    'sort_order',
+    'version',
+    'created_at',
+    'updated_at',
+  ],
+  live_trade_items: [
+    'item_id',
+    'owner_user_id',
+    'instrument_id',
+    'group_id',
+    'priority',
+    'direction',
+    'timeframe',
+    'entry_price',
+    'target_price',
+    'stop_loss',
+    'notes',
+    'trade_status',
+    'sort_order',
+    'version',
+    'created_at',
+    'updated_at',
+  ],
+  live_trade_quote_state: [
+    'owner_user_id',
+    'last_request_at',
+    'updated_at',
+  ],
 };
 
 module.exports = { EXPECTED_SCHEMA };

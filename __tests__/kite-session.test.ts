@@ -250,6 +250,52 @@ describe("requireSession", () => {
   });
 });
 
+// ─── Blank owner identity (Live Trade requirement) ──────────────────────────
+
+describe("blank owner identity", () => {
+  let warnSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
+  });
+
+  it("treats a session with an empty user id as unauthenticated", async () => {
+    await store.set("blank-owner", makeMockSession({ userId: "" }));
+
+    expect(await getSessionFromRequest(makeCookieHeader("blank-owner"))).toBeNull();
+    expect(await isAuthenticated(makeCookieHeader("blank-owner"))).toBe(false);
+    await expect(requireSession(makeCookieHeader("blank-owner"))).rejects.toThrow(
+      "UNAUTHENTICATED"
+    );
+    expect(warnSpy).toHaveBeenCalled();
+  });
+
+  it("treats a whitespace-only user id as unauthenticated", async () => {
+    await store.set("space-owner", makeMockSession({ userId: "   " }));
+
+    expect(await getSessionFromRequest(makeCookieHeader("space-owner"))).toBeNull();
+  });
+
+  it("treats a missing user id as unauthenticated", async () => {
+    await store.set(
+      "missing-owner",
+      makeMockSession({ userId: undefined as unknown as string })
+    );
+
+    expect(await getSessionFromRequest(makeCookieHeader("missing-owner"))).toBeNull();
+  });
+
+  it("still accepts a valid user id", async () => {
+    await store.set("valid-owner", makeMockSession({ userId: "ZP0001" }));
+
+    expect(await isAuthenticated(makeCookieHeader("valid-owner"))).toBe(true);
+  });
+});
+
 describe("getSessionByIdHash", () => {
   it("loads a live session by stored cookie hash without changing token handling", async () => {
     const mock = makeMockSession();

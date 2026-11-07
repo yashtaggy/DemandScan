@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+/* eslint-disable @typescript-eslint/no-require-imports -- CommonJS Node entry point */
 /**
  * DemandScan — read-only schema verification.
  *
@@ -27,22 +28,18 @@ const { loadDatabaseUrl, describeTarget } = require('./target');
  */
 const { EXPECTED_SCHEMA } = require('./expected-schema');
 
-async function main() {
-  const { url, source } = loadDatabaseUrl();
-  if (!url) {
-    console.error(
-      'ERROR: DATABASE_URL is not set.\n' +
-        'Add it to .env.local (local) or pass it inline:\n' +
-        '  DATABASE_URL="postgres://..." node db/verify-schema.js'
-    );
-    process.exit(1);
-  }
-
-  const target = describeTarget(url);
-  console.log(
-    `Database target: host=${target.host} database=${target.database} ` +
-      `sslmode=${target.sslmode} source=${source ?? 'unknown'} (credentials omitted)`
-  );
+/**
+ * Read-only schema check for an explicit connection URL.
+ *
+ * Prints one line per table and returns the number of missing table/column
+ * objects. It never prints the URL, so callers may pass a staging URL loaded
+ * through the staging guard.
+ *
+ * Exported so db/verify-staging-schema.js can reuse the exact same checks.
+ */
+async function verifySchema(url, options = {}) {
+  const log = options.log || console.log;
+  const fail = options.error || console.error;
 
   const { neon } = require('@neondatabase/serverless');
   const sql = neon(url);
@@ -65,20 +62,42 @@ async function main() {
   for (const [table, expectedCols] of Object.entries(EXPECTED_SCHEMA)) {
     const have = actual.get(table);
     if (!have || have.size === 0) {
-      console.error(`MISSING TABLE  ${table}`);
+      fail(`MISSING TABLE  ${table}`);
       missingCount += expectedCols.length;
       continue;
     }
     const missing = expectedCols.filter((c) => !have.has(c));
     if (missing.length === 0) {
-      console.log(`ok             ${table} (${expectedCols.length} expected columns present)`);
+      log(`ok             ${table} (${expectedCols.length} expected columns present)`);
     } else {
       for (const col of missing) {
-        console.error(`MISSING COLUMN ${table}.${col}`);
+        fail(`MISSING COLUMN ${table}.${col}`);
       }
       missingCount += missing.length;
     }
   }
+
+  return missingCount;
+}
+
+async function main() {
+  const { url, source } = loadDatabaseUrl();
+  if (!url) {
+    console.error(
+      'ERROR: DATABASE_URL is not set.\n' +
+        'Add it to .env.local (local) or pass it inline:\n' +
+        '  DATABASE_URL="postgres://..." node db/verify-schema.js'
+    );
+    process.exit(1);
+  }
+
+  const target = describeTarget(url);
+  console.log(
+    `Database target: host=${target.host} database=${target.database} ` +
+      `sslmode=${target.sslmode} source=${source ?? 'unknown'} (credentials omitted)`
+  );
+
+  const missingCount = await verifySchema(url);
 
   if (missingCount > 0) {
     console.error(
@@ -92,7 +111,11 @@ async function main() {
   console.log('\nSchema verification passed.');
 }
 
-main().catch((err) => {
-  console.error('Schema verification failed:', err.message);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error('Schema verification failed:', err.message);
+    process.exit(1);
+  });
+}
+
+module.exports = { verifySchema };

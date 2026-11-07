@@ -21,6 +21,7 @@
 import type { KiteSession } from "./types";
 import { getDb } from "./db";
 import { encrypt, decrypt, hashSessionId } from "./crypto";
+import { isValidOwnerId } from "./live-trade/validation";
 
 // ─── Re-export helpers needed by callers ─────────────────────────────────────
 
@@ -174,14 +175,28 @@ export function getSessionIdFromCookies(
 
 /**
  * Resolve the current KiteSession from a request cookie header.
- * Returns null if cookie is absent, session not found, or session expired.
+ * Returns null if cookie is absent, session not found, session expired, or
+ * the stored Kite user id is missing/blank.
+ *
+ * A session without a usable user id cannot scope owner data. Rejecting it
+ * here keeps every authenticated route (Scanner included) from operating under
+ * an empty owner identity.
  */
 export async function getSessionFromRequest(
   cookieHeader: string | null | undefined
 ): Promise<KiteSession | null> {
   const sessionId = getSessionIdFromCookies(cookieHeader);
   if (!sessionId) return null;
-  return sessionStore.get(sessionId);
+
+  const session = await sessionStore.get(sessionId);
+  if (!session) return null;
+
+  if (!isValidOwnerId(session.userId)) {
+    console.warn("[session] Rejected session with a missing or blank Kite user id.");
+    return null;
+  }
+
+  return session;
 }
 
 /**

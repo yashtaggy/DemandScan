@@ -155,6 +155,98 @@ describe('database schema matches application code (schema-drift guard)', () => 
   });
 });
 
+describe('Live Trade schema contract (2026-11-06)', () => {
+  const files = loadSqlFiles();
+  const migration = files.find((f) =>
+    f.name.includes('2026-11-06-add-live-trade')
+  );
+  const rawSql = migration?.sql ?? '';
+  const sql = stripCommentLines(rawSql);
+
+  test('the Live Trade migration exists', () => {
+    expect(migration).toBeDefined();
+  });
+
+  test('the migration is additive and idempotent', () => {
+    expect(sql).not.toMatch(/\bDROP\s+(TABLE|INDEX)\b/i);
+    expect(sql).not.toMatch(/\bTRUNCATE\b/i);
+    expect(sql).not.toMatch(/\bDELETE\s+FROM\b/i);
+    expect(sql).not.toMatch(/\bALTER\s+TABLE\b/i);
+
+    const statements: string[] = splitStatements(rawSql);
+    const creates = statements.filter((s) =>
+      /^CREATE\s+(TABLE|UNIQUE\s+INDEX|INDEX)\b/i.test(s)
+    );
+    expect(creates.length).toBeGreaterThan(0);
+    for (const stmt of creates) {
+      expect(stmt).toMatch(/IF\s+NOT\s+EXISTS/i);
+    }
+  });
+
+  test('group ownership is enforced by a composite unique target and composite FK', () => {
+    expect(sql).toMatch(
+      /CONSTRAINT\s+live_trade_groups_group_owner_uq\s+UNIQUE\s*\(\s*group_id\s*,\s*owner_user_id\s*\)/i
+    );
+    expect(sql).toMatch(
+      /CONSTRAINT\s+live_trade_items_group_owner_fk\s+FOREIGN\s+KEY\s*\(\s*group_id\s*,\s*owner_user_id\s*\)\s+REFERENCES\s+live_trade_groups\s*\(\s*group_id\s*,\s*owner_user_id\s*\)/i
+    );
+    // The composite FK intentionally uses NO ACTION; the service ungroups
+    // items before deleting a group so owner_user_id is never nulled.
+    expect(sql).not.toMatch(
+      /live_trade_items_group_owner_fk[\s\S]{0,300}?ON\s+DELETE/i
+    );
+  });
+
+  test('group_id and timeframe are nullable for ungrouped items and Any timeframe', () => {
+    const groupLine = sql
+      .split('\n')
+      .find((line) => /^\s*group_id\s+UUID/i.test(line));
+    const timeframeLine = sql
+      .split('\n')
+      .find((line) => /^\s*timeframe\s+TEXT/i.test(line));
+
+    expect(groupLine).toBeDefined();
+    expect(timeframeLine).toBeDefined();
+    expect(groupLine).not.toMatch(/NOT\s+NULL/i);
+    expect(timeframeLine).not.toMatch(/NOT\s+NULL/i);
+    expect(sql).toMatch(/timeframe\s+IS\s+NULL\s+OR\s+timeframe\s+IN/i);
+  });
+
+  test('item uniqueness, versioning, notes limit and status enum are present', () => {
+    expect(sql).toMatch(
+      /CREATE\s+UNIQUE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+live_trade_items_owner_instrument_uq[\s\S]*?\(\s*owner_user_id\s*,\s*instrument_id\s*\)/i
+    );
+    expect(sql).toMatch(
+      /live_trade_items_version_pos\s+CHECK\s*\(\s*version\s*>=\s*1\s*\)/i
+    );
+    expect(sql).toMatch(
+      /live_trade_groups_version_pos\s+CHECK\s*\(\s*version\s*>=\s*1\s*\)/i
+    );
+    expect(sql).toMatch(
+      /live_trade_items_notes_len\s+CHECK\s*\(\s*char_length\s*\(\s*notes\s*\)\s*<=\s*2000\s*\)/i
+    );
+    for (const status of [
+      'WATCHING',
+      'WAITING_FOR_ENTRY',
+      'ACTIVE_TRADE',
+      'TARGET_HIT',
+      'STOP_LOSS_HIT',
+      'CLOSED',
+    ]) {
+      expect(sql).toContain(status);
+    }
+  });
+
+  test('quote cooldown state is one row per owner', () => {
+    const columns = parseCreatedTables(rawSql).get('live_trade_quote_state');
+    expect(columns).toBeDefined();
+    expect(columns!.has('owner_user_id')).toBe(true);
+    expect(columns!.has('last_request_at')).toBe(true);
+    expect(columns!.has('updated_at')).toBe(true);
+    expect(sql).toMatch(/owner_user_id\s+TEXT\s+PRIMARY\s+KEY/i);
+  });
+});
+
 describe('db/migrate.js statement splitter (db/sql-statements.js)', () => {
   // Root cause of the production `relation "hourly_ingestion_checkpoints" does
   // not exist` failure: the old migrate.js split the whole file on ';' FIRST,

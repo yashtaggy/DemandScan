@@ -13,7 +13,16 @@
     "typecheck": "tsc --noEmit",
     "db:migrate": "node db/migrate.js",
     "db:target": "node db/target.js",
-    "db:verify": "node db/verify-schema.js"
+    "db:verify": "node db/verify-schema.js",
+    "db:staging:preflight": "node db/preflight-staging.js",
+    "db:staging:migrate": "node db/migrate-staging.js",
+    "db:staging:verify": "node db/verify-staging-schema.js",
+    "db:production:live-trade:preflight": "node db/preflight-production.js",
+    "db:production:live-trade:migrate": "node db/migrate-live-trade-production.js",
+    "db:production:live-trade:verify": "node db/verify-live-trade-production.js",
+    "dev:staging": "node scripts/run-with-staging-env.js dev",
+    "start:staging": "node scripts/run-with-staging-env.js start",
+    "test:staging": "jest --config jest.staging.config.json --runInBand"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.2.0",

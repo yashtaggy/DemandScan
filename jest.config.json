@@ -13,7 +13,11 @@
       }
     }]
   },
-  "testMatch": ["**/__tests__/**/*.test.ts", "**/__tests__/**/*.test.tsx"],
+  "testMatch": [
+    "**/__tests__/**/*.test.ts",
+    "**/__tests__/**/*.test.tsx",
+    "**/tests/**/*.test.ts"
+  ],
   "collectCoverageFrom": [
     "lib/**/*.ts",
     "app/api/**/*.ts",

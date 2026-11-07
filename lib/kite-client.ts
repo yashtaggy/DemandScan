@@ -15,6 +15,7 @@
 import { KiteConnect } from "kiteconnect";
 import type { Connect, Instrument as KiteInstrument } from "kiteconnect";
 import { getKiteApiKey } from "./env";
+import { normalizeKiteTimestamp } from "./kite-timestamp";
 import type { Instrument, QuoteData, StockRow } from "./types";
 
 // ─── Client factory ───────────────────────────────────────────────────────────
@@ -32,27 +33,37 @@ export function createKiteClient(accessToken: string): Connect {
 // ─── Raw Kite quote shape (getQuote returns unknown; we assert the shape) ──────
 
 interface RawKiteQuote {
-  instrument_token: number;
-  timestamp: string;
-  last_trade_time: string;
-  last_price: number;
-  last_quantity: number;
-  buy_quantity: number;
-  sell_quantity: number;
-  volume: number;
-  average_price: number;
-  net_change: number;
+  instrument_token?: number;
+  /** The SDK converts 19-character IST wall clocks to a `Date`. */
+  timestamp?: string | Date | null;
+  last_trade_time?: string | Date | null;
+  last_price?: number;
+  last_quantity?: number;
+  buy_quantity?: number;
+  sell_quantity?: number;
+  volume?: number;
+  average_price?: number;
+  net_change?: number;
   oi?: number;
   oi_day_high?: number;
   oi_day_low?: number;
   lower_circuit_limit?: number;
   upper_circuit_limit?: number;
-  ohlc: {
-    open: number;
-    high: number;
-    low: number;
-    close: number;
-  };
+  ohlc?: {
+    open?: number;
+    high?: number;
+    low?: number;
+    close?: number;
+  } | null;
+}
+
+/**
+ * Maps one malformed entry without throwing, so a single bad quote cannot make
+ * the whole batch unavailable. Unusable numbers become sentinels that the
+ * quote contract already rejects (`lastPrice <= 0` → QUOTE_INVALID).
+ */
+function finiteNumber(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
 // ─── Instrument cache ─────────────────────────────────────────────────────────
@@ -146,29 +157,35 @@ export async function getQuotes(
 
   const result = new Map<string, QuoteData>();
   for (const [symbol, q] of Object.entries(raw)) {
-    result.set(symbol, {
-      instrumentToken: q.instrument_token,
-      timestamp: q.timestamp,
-      lastTradeTime: q.last_trade_time,
-      lastPrice: q.last_price,
-      lastQuantity: q.last_quantity,
-      buyQuantity: q.buy_quantity,
-      sellQuantity: q.sell_quantity,
-      volume: q.volume,
-      averagePrice: q.average_price,
-      ohlc: {
-        open: q.ohlc.open,
-        high: q.ohlc.high,
-        low: q.ohlc.low,
-        close: q.ohlc.close,
-      },
-      netChange: q.net_change,
-      oi: q.oi ?? 0,
-      oiDayHigh: q.oi_day_high ?? 0,
-      oiDayLow: q.oi_day_low ?? 0,
-      lowerCircuitLimit: q.lower_circuit_limit ?? 0,
-      upperCircuitLimit: q.upper_circuit_limit ?? 0,
-    });
+    if (typeof q !== "object" || q === null) continue;
+    try {
+      const ohlc = typeof q.ohlc === "object" && q.ohlc !== null ? q.ohlc : {};
+      result.set(symbol, {
+        instrumentToken: finiteNumber(q.instrument_token),
+        timestamp: normalizeKiteTimestamp(q.timestamp) ?? "",
+        lastTradeTime: normalizeKiteTimestamp(q.last_trade_time) ?? "",
+        lastPrice: finiteNumber(q.last_price),
+        lastQuantity: finiteNumber(q.last_quantity),
+        buyQuantity: finiteNumber(q.buy_quantity),
+        sellQuantity: finiteNumber(q.sell_quantity),
+        volume: finiteNumber(q.volume),
+        averagePrice: finiteNumber(q.average_price),
+        ohlc: {
+          open: finiteNumber(ohlc.open),
+          high: finiteNumber(ohlc.high),
+          low: finiteNumber(ohlc.low),
+          close: finiteNumber(ohlc.close),
+        },
+        netChange: finiteNumber(q.net_change),
+        oi: finiteNumber(q.oi),
+        oiDayHigh: finiteNumber(q.oi_day_high),
+        oiDayLow: finiteNumber(q.oi_day_low),
+        lowerCircuitLimit: finiteNumber(q.lower_circuit_limit),
+        upperCircuitLimit: finiteNumber(q.upper_circuit_limit),
+      });
+    } catch {
+      // Skip only this entry; every other quote in the batch stays usable.
+    }
   }
 
   return result;
