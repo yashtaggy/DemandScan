@@ -26,6 +26,11 @@ import { Modal } from "./modal";
 interface ExpandedZonesProps {
   item: LiveTradeItemDto;
   summary: LiveTradeZoneSummaryDto | undefined;
+  /** The independent summary request is still in flight. */
+  zonesLoading: boolean;
+  /** The independent summary request failed. */
+  zonesError: boolean;
+  onRetryZones: () => void;
   onClose: () => void;
 }
 
@@ -101,12 +106,23 @@ function ZoneRow({ zone }: { zone: LiveTradeExpandedZoneDto }) {
   );
 }
 
-export function ExpandedZones({ item, summary, onClose }: ExpandedZonesProps) {
+export function ExpandedZones({
+  item,
+  summary,
+  zonesLoading,
+  zonesError,
+  onRetryZones,
+  onClose,
+}: ExpandedZonesProps) {
   const { zones, pagination, loading, loadingMore, error, loadMore, retry } =
     useExpandedZones(item.instrumentId, true);
 
-  const coverage = summary?.coverage ?? "UNKNOWN";
-  const coverageMeta = COVERAGE_META[coverage];
+  // A missing summary while the request is pending or failed is unknown, not
+  // a confirmed UNKNOWN coverage, so it must never render as one.
+  const coverageLoading = summary === undefined && zonesLoading;
+  const coverageError = summary === undefined && zonesError;
+  const coverage = summary?.coverage;
+  const coverageMeta = coverage ? COVERAGE_META[coverage] : null;
 
   return (
     <Modal
@@ -146,16 +162,48 @@ export function ExpandedZones({ item, summary, onClose }: ExpandedZonesProps) {
       <div className="space-y-3">
         <div className="rounded-lg border border-slate-700/40 bg-slate-800/30 px-3 py-2">
           <div className="flex flex-wrap items-center gap-2">
-            <CoverageBadge coverage={coverage} />
+            {coverageError ? (
+              <>
+                <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-300">
+                  Coverage unavailable
+                </span>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  loading={zonesLoading}
+                  onClick={onRetryZones}
+                >
+                  Retry coverage
+                </Button>
+              </>
+            ) : coverageLoading ? (
+              <span role="status" className="text-[11px] text-slate-500">
+                Loading zone coverage…
+              </span>
+            ) : coverage ? (
+              <CoverageBadge coverage={coverage} />
+            ) : (
+              <span className="rounded-full border border-slate-600/50 bg-slate-700/20 px-1.5 py-0.5 text-[10px] text-slate-400">
+                Coverage not loaded
+              </span>
+            )}
             {summary?.preferredTimeframe && (
               <Badge variant="neutral">
                 Preferred {summary.preferredTimeframe}
               </Badge>
             )}
           </div>
-          <p className="mt-1 text-[11px] leading-relaxed text-slate-500">
-            {coverageMeta.description}
-          </p>
+          {coverageMeta ? (
+            <p className="mt-1 text-[11px] leading-relaxed text-slate-500">
+              {coverageMeta.description}
+            </p>
+          ) : coverageError ? (
+            <p className="mt-1 text-[11px] leading-relaxed text-amber-400/80">
+              Zone coverage could not be loaded. Saved zones below are still
+              shown.
+            </p>
+          ) : null}
           {summary?.zoneFreshness.latestCoveringScanAt && (
             <p className="mt-0.5 text-[10px] text-slate-600">
               Latest covering scan{" "}

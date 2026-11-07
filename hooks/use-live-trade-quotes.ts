@@ -299,7 +299,9 @@ export function useLiveTradeQuotes(
       const now = Date.now();
       setClock(now);
       if (now >= cooldownEndsAt) clearInterval(timer);
-    }, 250);
+      // The label has one-second resolution; a faster tick would re-render the
+      // whole workspace without changing anything visible.
+    }, 1000);
 
     return () => clearInterval(timer);
   }, [cooldownEndsAt]);

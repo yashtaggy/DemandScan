@@ -5,11 +5,12 @@
  * instruments, with an optional paginated expanded list for one instrument.
  *
  * Query parameters:
- *   instrumentIds   comma-separated ids limited to the owner's selection
- *   timeframe       a scanner timeframe or "any"; absent uses each item's value
- *   includeExpanded "true" requires exactly one instrument
- *   limit           1-500 (default 100)
- *   offset          0-4999; offset + limit <= 5000
+ *   instrumentIds     comma-separated ids limited to the owner's selection
+ *   timeframe         a scanner timeframe or "any"; absent uses each item's value
+ *   includeExpanded   "true" requires exactly one instrument
+ *   includeSummaries  "false" skips nearest/coverage reads (default true)
+ *   limit             1-500 (default 100)
+ *   offset            0-4999; offset + limit <= 5000
  *
  * No quote is fetched. Expanded zones therefore never carry a distance.
  */

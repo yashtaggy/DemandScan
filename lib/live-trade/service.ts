@@ -311,8 +311,9 @@ export interface LiveTradeZonesResponseDto {
 }
 
 export interface LiveTradeBoardZonesDto {
-  available: true;
-  status: "available";
+  /** True only when this response actually included zone summaries. */
+  available: boolean;
+  status: "available" | "not_requested";
   freshnessThresholdDays: number;
   summaries: LiveTradeZoneSummaryDto[];
 }
@@ -454,16 +455,32 @@ function buildZoneSummaries(input: ZoneSummaryInput): LiveTradeZoneSummaryDto[] 
   });
 }
 
+export interface BoardOptions {
+  /**
+   * `false` returns groups, items and instrument-master freshness without
+   * structural-zone summaries, and reports `zones.status: "not_requested"`
+   * with `zones.available: false`. Clients that load zone evidence as a
+   * separate request use this to keep the board shell fast.
+   */
+  includeZones?: boolean;
+}
+
 /**
- * Board workspace. Zone summaries are two bounded batched reads (nearest and
- * coverage) after the three workspace reads; there is no per-item query and no
- * Kite call. The board therefore renders identically while the market data
- * provider is unavailable.
+ * Board workspace. By default zone summaries are two bounded batched reads
+ * (nearest and coverage) after the three workspace reads; there is no per-item
+ * query and no Kite call. The board therefore renders identically while the
+ * market data provider is unavailable.
+ *
+ * `includeZones: false` skips both zone reads and reports
+ * `status: "not_requested"` with `available: false`, so a caller that omitted
+ * the summaries cannot mistake the empty array for confirmed coverage.
  */
 export async function getBoard(
-  ownerId: LiveTradeOwnerId
+  ownerId: LiveTradeOwnerId,
+  options: BoardOptions = {}
 ): Promise<LiveTradeBoardDto> {
   assertOwner(ownerId);
+  const includeZones = options.includeZones !== false;
   const now = new Date();
   const [groups, items, master] = await Promise.all([
     repository.listGroups(ownerId),
@@ -472,7 +489,7 @@ export async function getBoard(
   ]);
 
   let summaries: LiveTradeZoneSummaryDto[] = [];
-  if (items.length > 0) {
+  if (includeZones && items.length > 0) {
     const selection = items.map((item) => ({
       instrumentId: item.instrumentId,
       symbol: item.symbol,
@@ -497,8 +514,8 @@ export async function getBoard(
     items,
     instrumentMaster: describeInstrumentMaster(master),
     zones: {
-      available: true,
-      status: "available",
+      available: includeZones,
+      status: includeZones ? "available" : "not_requested",
       freshnessThresholdDays: LIVE_TRADE_ZONE_FRESHNESS_DAYS,
       summaries,
     },
@@ -839,6 +856,8 @@ export interface LiveTradeZoneQueryOptions {
   hasTimeframeOverride: boolean;
   timeframeOverride: LiveTradeTimeframe | null;
   includeExpanded: boolean;
+  /** Defaults to true; false skips nearest and coverage reads. */
+  includeSummaries?: boolean;
   limit: number;
   offset: number;
 }
@@ -894,25 +913,28 @@ export async function getZoneOverviewsAt(
     };
   }
 
-  const instrumentIds = selection.map((row) => row.instrumentId);
-  const [nearestRows, coverageRows] = await Promise.all([
-    repository.getNearestZones(
-      ownerId,
-      instrumentIds,
-      options.timeframeOverride,
-      options.hasTimeframeOverride
-    ),
-    repository.getZoneCoverage(ownerId, instrumentIds),
-  ]);
+  let summaries: LiveTradeZoneSummaryDto[] = [];
+  if (options.includeSummaries !== false) {
+    const instrumentIds = selection.map((row) => row.instrumentId);
+    const [nearestRows, coverageRows] = await Promise.all([
+      repository.getNearestZones(
+        ownerId,
+        instrumentIds,
+        options.timeframeOverride,
+        options.hasTimeframeOverride
+      ),
+      repository.getZoneCoverage(ownerId, instrumentIds),
+    ]);
 
-  const summaries = buildZoneSummaries({
-    now,
-    selection,
-    coverageRows,
-    nearestRows,
-    hasTimeframeOverride: options.hasTimeframeOverride,
-    timeframeOverride: options.timeframeOverride,
-  });
+    summaries = buildZoneSummaries({
+      now,
+      selection,
+      coverageRows,
+      nearestRows,
+      hasTimeframeOverride: options.hasTimeframeOverride,
+      timeframeOverride: options.timeframeOverride,
+    });
+  }
 
   let expanded: LiveTradeZonesResponseDto["expanded"] = null;
   if (options.includeExpanded) {

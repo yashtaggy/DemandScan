@@ -106,6 +106,12 @@ batched reads (nearest zones and coverage). It never calls Kite or the scanner,
 holds no in-memory quote state and is deliberately independent of `/quotes`, so
 the board renders when market data is unavailable.
 
+Query parameters:
+
+| Parameter | Rules |
+| --- | --- |
+| `includeZones` | `true`/`false` only, default `true`. `false` returns the workspace shell only (groups, items, instrument master) and performs no zone reads; `zones` is then `{ "available": false, "status": "not_requested", "freshnessThresholdDays": 7, "summaries": [] }`. `not_requested` means the summaries were deliberately skipped, not that coverage was checked. The Live Trade UI uses this so the list renders before zone evidence, then loads `/zones` separately. |
+
 ```json
 {
   "success": true,
@@ -199,6 +205,11 @@ The board's zone summaries never contain a distance: the board performs no
 quote lookup, so `distancePercent` is always `null` here. Distances are computed
 only by `/quotes` from the quote it has already fetched. The board returns no
 expanded zone lists.
+
+`zones.status` is `available` when this response included the summaries and
+`not_requested` when `includeZones=false` skipped them; `zones.available`
+mirrors that. `not_requested` with `summaries: []` means "not checked", not
+"no coverage", so clients must not present it as a coverage verdict.
 
 Instrument-master freshness:
 
@@ -429,6 +440,7 @@ Query parameters:
 | `instrumentIds` | Optional comma-separated positive integers, max 200, no duplicates, restricted to the owner's board. |
 | `timeframe` | Optional scanner timeframe (`1H`, `4H`, `1D`, `1W`, `1M`, `3M`, `6M`, `1Y`) or `any`. Absent uses each item's saved timeframe. |
 | `includeExpanded` | `true`/`false` only. `true` requires exactly one selected instrument. |
+| `includeSummaries` | `true`/`false` only, default `true`. `false` skips the nearest-zone and coverage reads and returns `summaries: []`; it is only useful together with `includeExpanded=true`, which needs neither. |
 | `limit` | 1–500, default 100. |
 | `offset` | 0–4999, default 0; `offset + limit ≤ 5000`. |
 

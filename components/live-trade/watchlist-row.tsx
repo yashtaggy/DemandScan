@@ -1,5 +1,6 @@
 "use client";
 
+import { memo } from "react";
 import type {
   LiveTradeGroupDto,
   LiveTradeItemDto,
@@ -24,6 +25,8 @@ interface WatchlistRowProps {
   quote: LiveTradeQuoteDto | undefined;
   quoteDisplayState: QuoteDisplayState;
   zonesAvailable: boolean;
+  zonesLoading: boolean;
+  zonesError: boolean;
   quoteLoading: boolean;
   groups: LiveTradeGroupDto[];
   busy: boolean;
@@ -88,13 +91,15 @@ function PlanValue({ label, value }: { label: string; value: number | null }) {
   );
 }
 
-export function WatchlistRow({
+function WatchlistRowComponent({
   item,
   groupName,
   summary,
   quote,
   quoteDisplayState,
   zonesAvailable,
+  zonesLoading,
+  zonesError,
   quoteLoading,
   groups,
   busy,
@@ -282,6 +287,8 @@ export function WatchlistRow({
               quote={quote}
               zonesAvailable={zonesAvailable}
               displayState={quoteDisplayState}
+              zonesLoading={zonesLoading}
+              zonesError={zonesError}
             />
           </section>
         </div>
@@ -300,3 +307,33 @@ export function WatchlistRow({
     </article>
   );
 }
+
+/**
+ * A row re-renders only when its own data changes. Callback identities are
+ * ignored because Watchlist recreates them per render: the reorder handlers
+ * go through a latest-handler ref, and every other handler acts on the item
+ * id against the board state at execution time, so a memoised row can never
+ * invoke an obsolete handler.
+ */
+function sameRowProps(
+  previous: WatchlistRowProps,
+  next: WatchlistRowProps
+): boolean {
+  return (
+    previous.item === next.item &&
+    previous.groupName === next.groupName &&
+    previous.summary === next.summary &&
+    previous.quote === next.quote &&
+    previous.quoteDisplayState === next.quoteDisplayState &&
+    previous.zonesAvailable === next.zonesAvailable &&
+    previous.zonesLoading === next.zonesLoading &&
+    previous.zonesError === next.zonesError &&
+    previous.quoteLoading === next.quoteLoading &&
+    previous.groups === next.groups &&
+    previous.busy === next.busy &&
+    previous.canMoveUp === next.canMoveUp &&
+    previous.canMoveDown === next.canMoveDown
+  );
+}
+
+export const WatchlistRow = memo(WatchlistRowComponent, sameRowProps);

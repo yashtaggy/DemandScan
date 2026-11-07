@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   createGroup,
@@ -9,6 +9,7 @@ import {
   deleteItem,
   isLiveTradeClientError,
   liveTradeErrorMessage,
+  LiveTradeClientError,
   reorderGroups,
   reorderItems,
   updateGroup,
@@ -20,6 +21,7 @@ import { LIVE_TRADE_ITEM_LIMIT } from "@/lib/live-trade/constants";
 import { formatCount } from "@/lib/live-trade/ui";
 import { useLiveTradeBoard } from "@/hooks/use-live-trade-board";
 import { useLiveTradeQuotes } from "@/hooks/use-live-trade-quotes";
+import { useLiveTradeZoneSummaries } from "@/hooks/use-live-trade-zone-summaries";
 import type { InstrumentSearchResult } from "@/hooks/use-instrument-search";
 import { InstrumentSearch } from "./instrument-search";
 import { ItemEditor } from "./item-editor";
@@ -42,6 +44,80 @@ import {
 
 interface LiveTradeWorkspaceProps {
   authMarket: MarketStatusView | null;
+}
+
+interface WatchlistFilters {
+  search: string;
+  groupFilter: GroupFilter;
+  priorityFilter: PriorityFilter;
+}
+
+function matchesFilters(
+  item: LiveTradeItemDto,
+  filters: WatchlistFilters
+): boolean {
+  if (filters.groupFilter === "UNGROUPED" && item.groupId !== null) return false;
+  if (
+    filters.groupFilter !== "ALL" &&
+    filters.groupFilter !== "UNGROUPED" &&
+    item.groupId !== filters.groupFilter
+  ) {
+    return false;
+  }
+  if (
+    filters.priorityFilter !== "ALL" &&
+    item.priority !== filters.priorityFilter
+  ) {
+    return false;
+  }
+  const needle = filters.search.trim().toLowerCase();
+  if (needle === "") return true;
+  return (
+    item.symbol.toLowerCase().includes(needle) ||
+    (item.companyName ?? "").toLowerCase().includes(needle) ||
+    item.notes.toLowerCase().includes(needle)
+  );
+}
+
+/**
+ * Resolves a move against the current row order so the submitted payload is
+ * always the complete, up-to-date item set. Returns null when the row or its
+ * visible neighbour no longer exists.
+ */
+function reorderPayloadFor(
+  items: LiveTradeItemDto[],
+  filters: WatchlistFilters,
+  itemId: string,
+  direction: "up" | "down"
+): string[] | null {
+  const visible = items.filter((item) => matchesFilters(item, filters));
+  const visibleIndex = visible.findIndex((item) => item.itemId === itemId);
+  if (visibleIndex < 0) return null;
+  const neighbour = visible[visibleIndex + (direction === "up" ? -1 : 1)];
+  if (!neighbour) return null;
+
+  const orderedIds = items.map((item) => item.itemId);
+  const from = orderedIds.indexOf(itemId);
+  const to = orderedIds.indexOf(neighbour.itemId);
+  if (from < 0 || to < 0) return null;
+  orderedIds.splice(from, 1);
+  orderedIds.splice(to, 0, itemId);
+  return orderedIds;
+}
+
+function groupReorderPayloadFor(
+  groups: { groupId: string }[],
+  groupId: string,
+  direction: "up" | "down"
+): string[] | null {
+  const orderedIds = groups.map((group) => group.groupId);
+  const from = orderedIds.indexOf(groupId);
+  if (from < 0) return null;
+  const to = from + (direction === "up" ? -1 : 1);
+  if (to < 0 || to >= orderedIds.length) return null;
+  orderedIds.splice(from, 1);
+  orderedIds.splice(to, 0, groupId);
+  return orderedIds;
 }
 
 function WorkspaceSkeleton() {
@@ -75,7 +151,7 @@ function ReconnectLink() {
 }
 
 export function LiveTradeWorkspace({ authMarket }: LiveTradeWorkspaceProps) {
-  const { board, loading, refreshing, error, refetch } =
+  const { board, loading, refreshing, error, refetch, runBoardTask } =
     useLiveTradeBoard(true);
   const { toasts, push, dismiss } = useToasts();
 
@@ -83,12 +159,35 @@ export function LiveTradeWorkspace({ authMarket }: LiveTradeWorkspaceProps) {
   const [groupFilter, setGroupFilter] = useState<GroupFilter>("ALL");
   const [priorityFilter, setPriorityFilter] =
     useState<PriorityFilter>("ALL");
-  const [busyItemId, setBusyItemId] = useState<string | null>(null);
+  const [busyItemIds, setBusyItemIds] = useState<ReadonlySet<string>>(
+    () => new Set()
+  );
   const [editingItemId, setEditingItemId] = useState<string | null>(null);
   const [deleteItemId, setDeleteItemId] = useState<string | null>(null);
   const [deletePending, setDeletePending] = useState(false);
   const [expandedItemId, setExpandedItemId] = useState<string | null>(null);
   const [groupManagerOpen, setGroupManagerOpen] = useState(false);
+
+  // Queued reorder tasks run after other board changes; they resolve the move
+  // against the filters that are current when they execute.
+  const filtersRef = useRef<WatchlistFilters>({
+    search,
+    groupFilter,
+    priorityFilter,
+  });
+  useEffect(() => {
+    filtersRef.current = { search, groupFilter, priorityFilter };
+  }, [search, groupFilter, priorityFilter]);
+
+  const markItemBusy = useCallback((itemId: string, busy: boolean) => {
+    setBusyItemIds((previous) => {
+      if (previous.has(itemId) === busy) return previous;
+      const next = new Set(previous);
+      if (busy) next.add(itemId);
+      else next.delete(itemId);
+      return next;
+    });
+  }, []);
 
   const items = useMemo(() => board?.items ?? [], [board]);
   const groups = board?.groups ?? [];
@@ -111,38 +210,16 @@ export function LiveTradeWorkspace({ authMarket }: LiveTradeWorkspaceProps) {
     refresh: refreshQuotes,
   } = useLiveTradeQuotes(instrumentIds, instrumentIds.length > 0);
 
-  const summaries = useMemo(
-    () =>
-      new Map(
-        (board?.zones.summaries ?? []).map((summary) => [
-          summary.instrumentId,
-          summary,
-        ])
-      ),
-    [board]
-  );
+  const {
+    summaries,
+    loading: zonesLoading,
+    error: zonesError,
+    reload: reloadZones,
+  } = useLiveTradeZoneSummaries(board !== null && items.length > 0);
 
   const filteredItems = useMemo(() => {
-    const needle = search.trim().toLowerCase();
-    return items.filter((item) => {
-      if (groupFilter === "UNGROUPED" && item.groupId !== null) return false;
-      if (
-        groupFilter !== "ALL" &&
-        groupFilter !== "UNGROUPED" &&
-        item.groupId !== groupFilter
-      ) {
-        return false;
-      }
-      if (priorityFilter !== "ALL" && item.priority !== priorityFilter) {
-        return false;
-      }
-      if (needle === "") return true;
-      return (
-        item.symbol.toLowerCase().includes(needle) ||
-        (item.companyName ?? "").toLowerCase().includes(needle) ||
-        item.notes.toLowerCase().includes(needle)
-      );
-    });
+    const filters = { search, groupFilter, priorityFilter };
+    return items.filter((item) => matchesFilters(item, filters));
   }, [items, search, groupFilter, priorityFilter]);
 
   const quoteSummary = useMemo<QuoteSummaryView>(() => {
@@ -180,8 +257,19 @@ export function LiveTradeWorkspace({ authMarket }: LiveTradeWorkspaceProps) {
     instrument: InstrumentSearchResult,
     groupId: string | null
   ) {
-    await createItem({ instrumentId: instrument.instrumentId, groupId });
-    await refetch();
+    await runBoardTask(async ({ apply }) => {
+      const created = await createItem({
+        instrumentId: instrument.instrumentId,
+        groupId,
+      });
+      // The server response is the authoritative row, so the list updates
+      // immediately instead of waiting for a second board round trip.
+      apply((previous) => ({
+        ...previous,
+        items: [...previous.items, created],
+      }));
+    });
+    reloadZones();
     push("success", `${instrument.symbol} added to your board.`);
   }
 
@@ -189,70 +277,121 @@ export function LiveTradeWorkspace({ authMarket }: LiveTradeWorkspaceProps) {
     item: LiveTradeItemDto,
     payload: UpdateItemPayload
   ) {
-    await updateItem(item.itemId, payload);
-    await refetch();
+    const updated = await runBoardTask(async ({ board: latest, apply }) => {
+      const current = latest.items.find(
+        (candidate) => candidate.itemId === item.itemId
+      );
+      if (!current) {
+        throw new LiveTradeClientError(
+          `${item.symbol} is no longer on your board.`,
+          { status: 404, code: "NOT_FOUND" }
+        );
+      }
+      // Another queued task (for example a reorder) may have bumped the
+      // version since this editor opened; the server still rejects the write
+      // when someone else changed the row.
+      const next = await updateItem(item.itemId, {
+        ...payload,
+        version: current.version,
+      });
+      apply((previous) => ({
+        ...previous,
+        items: previous.items.map((candidate) =>
+          candidate.itemId === next.itemId ? next : candidate
+        ),
+      }));
+      return next;
+    });
+    // A different timeframe changes which zone is preferred, so only that
+    // edit needs the heavier summary reads again.
+    if (item.timeframe !== updated.timeframe) reloadZones();
     setEditingItemId(null);
     push("success", `${item.symbol} updated.`);
   }
 
   async function handleDelete() {
-    if (!deleteTarget) return;
+    const target = deleteTarget;
+    if (!target) return;
     setDeletePending(true);
-    setBusyItemId(deleteTarget.itemId);
+    markItemBusy(target.itemId, true);
     try {
-      await deleteItem(deleteTarget.itemId, deleteTarget.version);
-      await refetch();
+      await runBoardTask(async ({ board: latest, apply }) => {
+        const current = latest.items.find(
+          (candidate) => candidate.itemId === target.itemId
+        );
+        if (!current) return;
+        await deleteItem(current.itemId, current.version);
+        apply((previous) => ({
+          ...previous,
+          items: previous.items.filter(
+            (candidate) => candidate.itemId !== target.itemId
+          ),
+        }));
+      });
       setDeleteItemId(null);
-      push("success", `${deleteTarget.symbol} removed from your board.`);
+      push("success", `${target.symbol} removed from your board.`);
     } catch (cause) {
       push("error", liveTradeErrorMessage(cause));
     } finally {
       setDeletePending(false);
-      setBusyItemId(null);
+      markItemBusy(target.itemId, false);
     }
   }
 
-  function handleReorder(item: LiveTradeItemDto, direction: "up" | "down") {
-    const visibleIndex = filteredItems.findIndex(
-      (candidate) => candidate.itemId === item.itemId
-    );
-    const neighbour = filteredItems[visibleIndex + (direction === "up" ? -1 : 1)];
-    if (!neighbour) return;
-
-    const orderedIds = items.map((candidate) => candidate.itemId);
-    const from = orderedIds.indexOf(item.itemId);
-    const to = orderedIds.indexOf(neighbour.itemId);
-    if (from < 0 || to < 0) return;
-    orderedIds.splice(from, 1);
-    orderedIds.splice(to, 0, item.itemId);
-
-    setBusyItemId(item.itemId);
-    reorderItems(orderedIds)
-      .then(async () => {
-        await refetch();
-      })
-      .catch(async (cause: unknown) => {
-        push("error", liveTradeErrorMessage(cause));
-        if (
-          isLiveTradeClientError(cause) &&
-          (cause.code === "REORDER_STALE" || cause.code === "EDIT_CONFLICT")
-        ) {
-          await refetch();
+  const handleReorder = useCallback(
+    (item: LiveTradeItemDto, direction: "up" | "down") => {
+      void (async () => {
+        markItemBusy(item.itemId, true);
+        try {
+          await runBoardTask(async ({ board: latest, apply }) => {
+            const orderedIds = reorderPayloadFor(
+              latest.items,
+              filtersRef.current,
+              item.itemId,
+              direction
+            );
+            if (orderedIds === null) return;
+            const next = await reorderItems(orderedIds);
+            apply((previous) => ({ ...previous, items: next }));
+          });
+        } catch (cause) {
+          push("error", liveTradeErrorMessage(cause));
+          if (
+            isLiveTradeClientError(cause) &&
+            (cause.code === "REORDER_STALE" || cause.code === "EDIT_CONFLICT")
+          ) {
+            await refetch();
+          }
+        } finally {
+          markItemBusy(item.itemId, false);
         }
-      })
-      .finally(() => {
-        setBusyItemId(null);
-      });
-  }
+      })();
+    },
+    [markItemBusy, push, refetch, runBoardTask]
+  );
 
   async function handleMoveGroup(
     item: LiveTradeItemDto,
     groupId: string | null
   ) {
-    setBusyItemId(item.itemId);
+    markItemBusy(item.itemId, true);
     try {
-      await updateItem(item.itemId, { version: item.version, groupId });
-      await refetch();
+      await runBoardTask(async ({ board: latest, apply }) => {
+        const current = latest.items.find(
+          (candidate) => candidate.itemId === item.itemId
+        );
+        if (!current) return;
+        const updated = await updateItem(item.itemId, {
+          version: current.version,
+          groupId,
+        });
+        apply((previous) => ({
+          ...previous,
+          items: previous.items.map((candidate) =>
+            candidate.itemId === updated.itemId ? updated : candidate
+          ),
+        }));
+      });
       push("success", `${item.symbol} moved.`);
     } catch (cause) {
       push("error", liveTradeErrorMessage(cause));
@@ -260,13 +399,18 @@ export function LiveTradeWorkspace({ authMarket }: LiveTradeWorkspaceProps) {
         await refetch();
       }
     } finally {
-      setBusyItemId(null);
+      markItemBusy(item.itemId, false);
     }
   }
 
   async function handleCreateGroup(name: string) {
-    await createGroup(name);
-    await refetch();
+    await runBoardTask(async ({ apply }) => {
+      const created = await createGroup(name);
+      apply((previous) => ({
+        ...previous,
+        groups: [...previous.groups, created],
+      }));
+    });
     push("success", `Group “${name}” created.`);
   }
 
@@ -274,21 +418,75 @@ export function LiveTradeWorkspace({ authMarket }: LiveTradeWorkspaceProps) {
     group: { groupId: string; name: string; version: number },
     name: string
   ) {
-    await updateGroup(group.groupId, name, group.version);
-    await refetch();
+    await runBoardTask(async ({ board: latest, apply }) => {
+      const current = latest.groups.find(
+        (candidate) => candidate.groupId === group.groupId
+      );
+      if (!current) {
+        throw new LiveTradeClientError("That group no longer exists.", {
+          status: 404,
+          code: "NOT_FOUND",
+        });
+      }
+      const updated = await updateGroup(
+        group.groupId,
+        name,
+        current.version
+      );
+      apply((previous) => ({
+        ...previous,
+        groups: previous.groups.map((candidate) =>
+          candidate.groupId === updated.groupId ? updated : candidate
+        ),
+      }));
+    });
     push("success", "Group renamed.");
   }
 
   async function handleDeleteGroup(group: { groupId: string; version: number }) {
-    await deleteGroup(group.groupId, group.version);
-    if (groupFilter === group.groupId) setGroupFilter("ALL");
-    await refetch();
+    await runBoardTask(async ({ board: latest, apply, refresh }) => {
+      const current = latest.groups.find(
+        (candidate) => candidate.groupId === group.groupId
+      );
+      if (!current) return;
+      await deleteGroup(current.groupId, current.version);
+      if (filtersRef.current.groupFilter === group.groupId) {
+        filtersRef.current = { ...filtersRef.current, groupFilter: "ALL" };
+        setGroupFilter("ALL");
+      }
+      apply((previous) => ({
+        ...previous,
+        groups: previous.groups.filter(
+          (candidate) => candidate.groupId !== group.groupId
+        ),
+        items: previous.items.map((candidate) =>
+          candidate.groupId === group.groupId
+            ? { ...candidate, groupId: null }
+            : candidate
+        ),
+      }));
+      // Deleting a group also bumps the version of every item it held. Those
+      // new versions are not in the delete response, so reconcile before this
+      // task releases the queue and a later mutation reuses a stale version.
+      await refresh();
+    });
     push("success", "Group deleted. Its instruments are now ungrouped.");
   }
 
-  async function handleReorderGroups(orderedGroupIds: string[]) {
-    await reorderGroups(orderedGroupIds);
-    await refetch();
+  async function handleReorderGroups(
+    groupId: string,
+    direction: "up" | "down"
+  ) {
+    await runBoardTask(async ({ board: latest, apply }) => {
+      const orderedIds = groupReorderPayloadFor(
+        latest.groups,
+        groupId,
+        direction
+      );
+      if (orderedIds === null) return;
+      const next = await reorderGroups(orderedIds);
+      apply((previous) => ({ ...previous, groups: next }));
+    });
   }
 
   const sessionExpired =
@@ -447,6 +645,27 @@ export function LiveTradeWorkspace({ authMarket }: LiveTradeWorkspaceProps) {
               </p>
             )}
 
+            {zonesError !== null && (
+              <div
+                role="alert"
+                className="flex flex-col gap-2 rounded-lg border border-amber-500/25 bg-amber-500/5 px-3 py-2 sm:flex-row sm:items-center sm:justify-between"
+              >
+                <p className="text-[11px] text-amber-300">
+                  Live zone summaries could not be loaded. Prices and plans
+                  are unaffected.
+                </p>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  loading={zonesLoading}
+                  onClick={reloadZones}
+                >
+                  Retry zones
+                </Button>
+              </div>
+            )}
+
             {filteredItems.length === 0 ? (
               <div className="rounded-xl border border-slate-700/50 bg-slate-800/30 px-4 py-10 text-center">
                 <p className="text-sm text-slate-400">
@@ -479,8 +698,10 @@ export function LiveTradeWorkspace({ authMarket }: LiveTradeWorkspaceProps) {
                 quotes={quotes}
                 quoteDisplayState={displayState}
                 zonesAvailable={zonesAvailable}
+                zonesLoading={zonesLoading}
+                zonesError={zonesError !== null}
                 quoteLoading={quotesLoading}
-                busyItemId={busyItemId}
+                busyItemIds={busyItemIds}
                 onEdit={(item) => setEditingItemId(item.itemId)}
                 onDelete={(item) => setDeleteItemId(item.itemId)}
                 onExpandZones={(item) => setExpandedItemId(item.itemId)}
@@ -527,6 +748,9 @@ export function LiveTradeWorkspace({ authMarket }: LiveTradeWorkspaceProps) {
         <ExpandedZones
           item={expandedItem}
           summary={summaries.get(expandedItem.instrumentId)}
+          zonesLoading={zonesLoading}
+          zonesError={zonesError !== null}
+          onRetryZones={reloadZones}
           onClose={() => setExpandedItemId(null)}
         />
       )}

@@ -387,6 +387,37 @@ describe("GET /api/live-trade/board", () => {
       "list-items",
     ]);
   });
+
+  it("skips zone reads when includeZones=false", async () => {
+    mockFake.seedItem({ owner: "owner-a", instrumentId: 1 });
+
+    const { status, body } = await call(
+      getBoard,
+      request("/api/live-trade/board?includeZones=false")
+    );
+    expect(status).toBe(200);
+    expect(body.data.zones).toEqual({
+      available: false,
+      status: "not_requested",
+      freshnessThresholdDays: 7,
+      summaries: [],
+    });
+    expect(mockFake.standaloneMarkers).toEqual([
+      "list-groups",
+      "list-items",
+      "instrument-master-info",
+    ]);
+  });
+
+  it("rejects an invalid includeZones value before any query", async () => {
+    const { status, body } = await call(
+      getBoard,
+      request("/api/live-trade/board?includeZones=yes")
+    );
+    expect(status).toBe(400);
+    expect(body.code).toBe("INVALID_QUERY");
+    expect(mockFake.standaloneMarkers).toEqual([]);
+  });
 });
 
 // ─── Instrument search ──────────────────────────────────────────────────────

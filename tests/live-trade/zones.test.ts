@@ -12,6 +12,7 @@
 import type { LiveTradeOwnerId } from "@/lib/live-trade/types";
 import { LiveTradeError } from "@/lib/live-trade/errors";
 import {
+  parseBoardQuery,
   parseInstrumentIdList,
   parseQuoteQuery,
   parseZoneListQuery,
@@ -865,6 +866,26 @@ describe("board zone summaries", () => {
       "list-items",
     ]);
   });
+
+  it("reports zones as not requested when includeZones is false", async () => {
+    const board = await getBoard(OWNER_A, { includeZones: false });
+
+    expect(board.zones).toEqual({
+      available: false,
+      status: "not_requested",
+      freshnessThresholdDays: 7,
+      summaries: [],
+    });
+    expect(mockFake.standaloneMarkers).not.toContain("zones:nearest");
+    expect(mockFake.standaloneMarkers).not.toContain("zones:coverage");
+  });
+
+  it("defaults to including zone summaries", async () => {
+    const board = await getBoard(OWNER_A);
+
+    expect(board.zones.status).toBe("available");
+    expect(board.zones.available).toBe(true);
+  });
 });
 
 // ─── Expanded zones and pagination ─────────────────────────────────────────
@@ -1087,9 +1108,32 @@ describe("query parsing", () => {
       hasTimeframeOverride: false,
       timeframeOverride: null,
       includeExpanded: false,
+      includeSummaries: true,
       limit: 100,
       offset: 0,
     });
+  });
+
+  it("parses includeSummaries=false without changing anything else", () => {
+    expect(parseZoneListQuery(params("includeSummaries=false"))).toMatchObject({
+      includeSummaries: false,
+      includeExpanded: false,
+      limit: 100,
+      offset: 0,
+    });
+    expect(() => parseZoneListQuery(params("includeSummaries=yes"))).toThrow(
+      LiveTradeError
+    );
+  });
+
+  it("defaults board zone summaries on and accepts an explicit opt-out", () => {
+    expect(parseBoardQuery(params(""))).toEqual({ includeZones: true });
+    expect(parseBoardQuery(params("includeZones=false"))).toEqual({
+      includeZones: false,
+    });
+    expect(() => parseBoardQuery(params("includeZones=no"))).toThrow(
+      LiveTradeError
+    );
   });
 
   it("accepts the maximum page size but rejects one above it", () => {

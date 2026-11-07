@@ -75,6 +75,9 @@ export function useExpandedZones(
           {
             instrumentIds: [id],
             includeExpanded: true,
+            // The caller already has this instrument's summary; only the
+            // expanded page is used, so skip the nearest/coverage reads.
+            includeSummaries: false,
             limit: pageSize,
             offset,
           },

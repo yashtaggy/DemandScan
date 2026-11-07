@@ -499,6 +499,7 @@ describe("GET /api/live-trade/zones", () => {
       "?timeframe=2D",
       "?timeframe=",
       "?includeExpanded=yes",
+      "?includeSummaries=yes",
       "?instrumentIds=1,1",
     ]) {
       const { status, body } = await call(
@@ -522,6 +523,29 @@ describe("GET /api/live-trade/zones", () => {
       request("/api/live-trade/zones?offset=4500&limit=500")
     );
     expect(boundary.status).toBe(200);
+  });
+
+  it("skips nearest/coverage when includeSummaries=false but still returns expanded zones", async () => {
+    mockFake.seedZone({ instrumentId: 1, side: "DEMAND", proximal: 100 });
+    mockFake.standaloneMarkers.length = 0;
+
+    const { status, body } = await call(
+      getZonesRoute,
+      request(
+        "/api/live-trade/zones?instrumentIds=1&includeExpanded=true&includeSummaries=false"
+      )
+    );
+    expect(status).toBe(200);
+    const data = body.data as {
+      summaries: unknown[];
+      expanded: { zones: unknown[] };
+    };
+    expect(data.summaries).toEqual([]);
+    expect(data.expanded.zones).toHaveLength(1);
+    expect(mockFake.standaloneMarkers).toEqual([
+      "list-quote-instruments",
+      "zones:expanded",
+    ]);
   });
 
   it("rejects includeExpanded for more than one selected instrument", async () => {

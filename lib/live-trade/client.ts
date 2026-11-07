@@ -220,8 +220,15 @@ function instrumentIdList(ids: number[]): string {
 
 // ─── Reads ───────────────────────────────────────────────────────────────────
 
-export function getBoard(signal?: AbortSignal): Promise<LiveTradeBoardDto> {
-  return request<LiveTradeBoardDto>("/api/live-trade/board", { signal });
+export function getBoard(
+  signal?: AbortSignal,
+  options: { includeZones?: boolean } = {}
+): Promise<LiveTradeBoardDto> {
+  const query =
+    options.includeZones === false ? "?includeZones=false" : "";
+  return request<LiveTradeBoardDto>(`/api/live-trade/board${query}`, {
+    signal,
+  });
 }
 
 export function searchInstruments(
@@ -255,6 +262,8 @@ export interface ZoneRequest {
   /** Absent keeps each item's saved timeframe; `null` means all timeframes. */
   timeframe?: LiveTradeTimeframe | null;
   includeExpanded?: boolean;
+  /** Defaults to true; false skips the nearest/coverage summary work. */
+  includeSummaries?: boolean;
   limit?: number;
   offset?: number;
 }
@@ -271,6 +280,9 @@ export function getZones(
     params.set("timeframe", options.timeframe ?? "any");
   }
   if (options.includeExpanded) params.set("includeExpanded", "true");
+  if (options.includeSummaries === false) {
+    params.set("includeSummaries", "false");
+  }
   if (options.limit !== undefined) params.set("limit", String(options.limit));
   if (options.offset !== undefined) params.set("offset", String(options.offset));
 

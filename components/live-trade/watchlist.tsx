@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useRef } from "react";
 import type {
   LiveTradeGroupDto,
   LiveTradeItemDto,
@@ -16,8 +17,10 @@ interface WatchlistProps {
   quotes: Record<number, LiveTradeQuoteDto>;
   quoteDisplayState: QuoteDisplayState;
   zonesAvailable: boolean;
+  zonesLoading: boolean;
+  zonesError: boolean;
   quoteLoading: boolean;
-  busyItemId: string | null;
+  busyItemIds: ReadonlySet<string>;
   onEdit: (item: LiveTradeItemDto) => void;
   onDelete: (item: LiveTradeItemDto) => void;
   onExpandZones: (item: LiveTradeItemDto) => void;
@@ -32,8 +35,10 @@ export function Watchlist({
   quotes,
   quoteDisplayState,
   zonesAvailable,
+  zonesLoading,
+  zonesError,
   quoteLoading,
-  busyItemId,
+  busyItemIds,
   onEdit,
   onDelete,
   onExpandZones,
@@ -41,6 +46,14 @@ export function Watchlist({
   onReorder,
 }: WatchlistProps) {
   const groupNames = new Map(groups.map((group) => [group.groupId, group.name]));
+
+  // Rows are memoised on data only, so a row can keep the reorder handlers
+  // from an earlier render. Routing them through the latest handler means a
+  // retained row still moves relative to the current list.
+  const reorderRef = useRef(onReorder);
+  useEffect(() => {
+    reorderRef.current = onReorder;
+  });
 
   return (
     <div className="space-y-2">
@@ -63,17 +76,19 @@ export function Watchlist({
             quote={quotes[item.instrumentId]}
             quoteDisplayState={quoteDisplayState}
             zonesAvailable={zonesAvailable}
+            zonesLoading={zonesLoading}
+            zonesError={zonesError}
             quoteLoading={quoteLoading}
             groups={groups}
-            busy={busyItemId === item.itemId}
+            busy={busyItemIds.has(item.itemId)}
             canMoveUp={index > 0}
             canMoveDown={index < items.length - 1}
             onEdit={() => onEdit(item)}
             onDelete={() => onDelete(item)}
             onExpandZones={() => onExpandZones(item)}
             onMoveGroup={(groupId) => onMoveGroup(item, groupId)}
-            onMoveUp={() => onReorder(item, "up")}
-            onMoveDown={() => onReorder(item, "down")}
+            onMoveUp={() => reorderRef.current(item, "up")}
+            onMoveDown={() => reorderRef.current(item, "down")}
           />
         ))}
       </div>

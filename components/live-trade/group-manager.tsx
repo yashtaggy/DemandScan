@@ -16,7 +16,7 @@ interface GroupManagerProps {
   onCreate: (name: string) => Promise<void>;
   onRename: (group: LiveTradeGroupDto, name: string) => Promise<void>;
   onDelete: (group: LiveTradeGroupDto) => Promise<void>;
-  onReorder: (orderedGroupIds: string[]) => Promise<void>;
+  onReorder: (groupId: string, direction: "up" | "down") => Promise<void>;
 }
 
 const inputClass =
@@ -40,6 +40,9 @@ export function GroupManager({
   const [error, setError] = useState<string | null>(null);
 
   const busy = creating || pendingId !== null || reordering;
+  // Rename/delete may be queued behind an in-flight reorder; the workspace
+  // serialises group mutations, so the action is applied to the latest order.
+  const rowActionsDisabled = creating || pendingId !== null;
   const atLimit = groups.length >= LIVE_TRADE_GROUP_LIMIT;
 
   async function handleCreate(event: React.FormEvent<HTMLFormElement>) {
@@ -114,17 +117,16 @@ export function GroupManager({
     }
   }
 
-  async function moveGroup(index: number, direction: -1 | 1) {
-    const target = index + direction;
+  async function moveGroup(index: number, direction: "up" | "down") {
+    const target = index + (direction === "up" ? -1 : 1);
     if (target < 0 || target >= groups.length) return;
-    const ordered = groups.map((group) => group.groupId);
-    const [moved] = ordered.splice(index, 1);
-    ordered.splice(target, 0, moved);
 
     setReordering(true);
     setError(null);
     try {
-      await onReorder(ordered);
+      // The workspace resolves the new order against its latest group list, so
+      // a queued move is never based on this render's snapshot.
+      await onReorder(groups[index].groupId, direction);
     } catch (cause) {
       setError(liveTradeErrorMessage(cause));
     } finally {
@@ -286,7 +288,7 @@ export function GroupManager({
                           aria-label={`Move ${group.name} up`}
                           title="Move up"
                           disabled={busy || index === 0}
-                          onClick={() => void moveGroup(index, -1)}
+                          onClick={() => void moveGroup(index, "up")}
                           className="rounded border border-slate-700/50 bg-slate-800/40 px-1.5 py-1 text-[11px] text-slate-400 hover:text-slate-200 disabled:opacity-30"
                         >
                           ↑
@@ -296,7 +298,7 @@ export function GroupManager({
                           aria-label={`Move ${group.name} down`}
                           title="Move down"
                           disabled={busy || index === groups.length - 1}
-                          onClick={() => void moveGroup(index, 1)}
+                          onClick={() => void moveGroup(index, "down")}
                           className="rounded border border-slate-700/50 bg-slate-800/40 px-1.5 py-1 text-[11px] text-slate-400 hover:text-slate-200 disabled:opacity-30"
                         >
                           ↓
@@ -309,7 +311,7 @@ export function GroupManager({
                             setConfirmDeleteId(null);
                             setError(null);
                           }}
-                          disabled={busy}
+                          disabled={rowActionsDisabled}
                           className="rounded border border-slate-700/50 bg-slate-800/40 px-1.5 py-1 text-[11px] text-slate-300 hover:bg-slate-700/50 disabled:opacity-30"
                         >
                           Rename
@@ -321,7 +323,7 @@ export function GroupManager({
                             setEditingId(null);
                             setError(null);
                           }}
-                          disabled={busy}
+                          disabled={rowActionsDisabled}
                           className="rounded border border-rose-500/20 bg-rose-500/5 px-1.5 py-1 text-[11px] text-rose-400 hover:bg-rose-500/10 disabled:opacity-30"
                         >
                           Delete

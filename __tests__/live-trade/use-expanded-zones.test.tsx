@@ -228,4 +228,108 @@ describe("useLiveTradeBoard", () => {
     expect(result.current.board?.items).toHaveLength(1);
     expect(result.current.error?.code).toBe("INTERNAL");
   });
+
+  test("requests the board shell without zone summaries", async () => {
+    fetchMock.mockResolvedValueOnce(ok({ success: true, data: board }));
+
+    const { result } = renderHook(() => useLiveTradeBoard(true));
+    await flush();
+
+    expect(String(fetchMock.mock.calls[0][0])).toBe(
+      "/api/live-trade/board?includeZones=false"
+    );
+    expect(result.current.board?.zones.summaries).toEqual([]);
+  });
+
+  test("applies a server-confirmed change without a refetch", async () => {
+    fetchMock.mockResolvedValueOnce(ok({ success: true, data: board }));
+
+    const { result } = renderHook(() => useLiveTradeBoard(true));
+    await flush();
+
+    await act(async () => {
+      await result.current.runBoardTask(async ({ apply }) => {
+        apply((previous) => ({
+          ...previous,
+          items: previous.items.map((item) => ({ ...item, notes: "edited" })),
+        }));
+      });
+    });
+
+    expect(result.current.board?.items[0].notes).toBe("edited");
+    expect(result.current.loading).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test("a queued mutation runs after an in-flight read and survives it", async () => {
+    fetchMock.mockResolvedValueOnce(ok({ success: true, data: board }));
+
+    const { result } = renderHook(() => useLiveTradeBoard(true));
+    await flush();
+
+    const pending = deferred<unknown>();
+    fetchMock.mockReturnValueOnce(pending.promise);
+    let refresh: Promise<void> = Promise.resolve();
+    act(() => {
+      refresh = result.current.refetch();
+    });
+
+    let task: Promise<void> = Promise.resolve();
+    act(() => {
+      task = result.current.runBoardTask(async ({ apply }) => {
+        apply((previous) => ({ ...previous, items: [] }));
+      });
+    });
+
+    // The mutation waits for the older read instead of interleaving with it.
+    expect(result.current.board?.items).toHaveLength(1);
+
+    await act(async () => {
+      pending.resolve(ok({ success: true, data: board }));
+      await refresh;
+      await task;
+      for (let i = 0; i < 6; i += 1) await Promise.resolve();
+    });
+
+    expect(result.current.board?.items).toHaveLength(0);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  test("a read that was already in flight cannot repopulate a disabled board", async () => {
+    fetchMock.mockResolvedValueOnce(ok({ success: true, data: board }));
+
+    const { result, rerender } = renderHook(
+      (props: { enabled: boolean }) => useLiveTradeBoard(props.enabled),
+      { initialProps: { enabled: true } }
+    );
+    await flush();
+    expect(result.current.board).not.toBeNull();
+
+    const pending = deferred<unknown>();
+    fetchMock.mockReturnValueOnce(pending.promise);
+    await act(async () => {
+      void result.current.refetch();
+      await Promise.resolve();
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    rerender({ enabled: false });
+    expect(result.current.board).toBeNull();
+
+    await act(async () => {
+      pending.resolve(ok({ success: true, data: board }));
+      for (let i = 0; i < 6; i += 1) await Promise.resolve();
+    });
+
+    expect(result.current.board).toBeNull();
+    expect(result.current.loading).toBe(false);
+  });
 });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}

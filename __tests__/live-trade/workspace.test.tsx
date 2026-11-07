@@ -18,6 +18,10 @@ const mockBoardHook = jest.fn();
 const mockQuotesHook = jest.fn();
 const mockSearchHook = jest.fn();
 const mockRefetch = jest.fn().mockResolvedValue(undefined);
+const mockApplyBoard = jest.fn();
+const mockRunBoardTask = jest.fn();
+const mockZonesHook = jest.fn();
+const mockReloadZones = jest.fn();
 const mockRefreshQuotes = jest.fn();
 const mockCreateItem = jest.fn().mockResolvedValue({});
 const mockUpdateItem = jest.fn().mockResolvedValue({});
@@ -26,6 +30,10 @@ const mockReorderItems = jest.fn().mockResolvedValue([]);
 
 jest.mock("@/hooks/use-live-trade-board", () => ({
   useLiveTradeBoard: () => mockBoardHook(),
+}));
+
+jest.mock("@/hooks/use-live-trade-zone-summaries", () => ({
+  useLiveTradeZoneSummaries: () => mockZonesHook(),
 }));
 
 jest.mock("@/hooks/use-live-trade-quotes", () => ({
@@ -103,6 +111,7 @@ function boardState(board: unknown, error: unknown = null) {
     refreshing: false,
     error,
     refetch: mockRefetch,
+    runBoardTask: mockRunBoardTask,
   };
 }
 
@@ -140,7 +149,11 @@ beforeEach(() => {
   mockBoardHook.mockReset();
   mockQuotesHook.mockReset();
   mockSearchHook.mockReset();
+  mockZonesHook.mockReset();
   mockRefetch.mockClear();
+  mockApplyBoard.mockClear();
+  mockRunBoardTask.mockClear();
+  mockReloadZones.mockClear();
   mockRefreshQuotes.mockClear();
   mockCreateItem.mockClear();
   mockUpdateItem.mockClear();
@@ -149,8 +162,30 @@ beforeEach(() => {
 
   mockBoardHook.mockReturnValue(boardState(makeBoard([])));
   mockQuotesHook.mockReturnValue(quoteState());
+  mockZonesHook.mockReturnValue({
+    summaries: new Map(),
+    loading: false,
+    error: null,
+    reload: mockReloadZones,
+  });
   mockSearchHook.mockImplementation((query: string) =>
     query.trim() === "" ? emptySearch() : emptySearch()
+  );
+  mockRunBoardTask.mockImplementation(
+    async (
+      task: (context: {
+        board: unknown;
+        apply: typeof mockApplyBoard;
+        refresh: typeof mockRefetch;
+      }) => Promise<unknown>
+    ) => {
+      const board = mockBoardHook().board;
+      return task({
+        board,
+        apply: mockApplyBoard,
+        refresh: mockRefetch,
+      });
+    }
   );
 });
 
@@ -164,7 +199,7 @@ describe("LiveTradeWorkspace", () => {
     expect(screen.getByText(/0 tracked instruments/)).toBeTruthy();
   });
 
-  test("adds a searched instrument and refreshes the board", async () => {
+  test("adds a searched instrument without reloading the whole board", async () => {
     mockSearchHook.mockImplementation((query: string) =>
       query.trim() === ""
         ? emptySearch()
@@ -186,6 +221,9 @@ describe("LiveTradeWorkspace", () => {
             error: null,
           }
     );
+    mockCreateItem.mockResolvedValueOnce(
+      makeItem({ itemId: "new", instrumentId: 408065, symbol: "INFY" })
+    );
 
     render(<LiveTradeWorkspace authMarket={null} />);
     fireEvent.change(screen.getByLabelText("Search NSE instruments to add"), {
@@ -202,7 +240,10 @@ describe("LiveTradeWorkspace", () => {
       instrumentId: 408065,
       groupId: null,
     });
-    expect(mockRefetch).toHaveBeenCalled();
+    expect(mockApplyBoard).toHaveBeenCalledTimes(1);
+    // Zone evidence for the new instrument is fetched separately.
+    expect(mockReloadZones).toHaveBeenCalledTimes(1);
+    expect(mockRefetch).not.toHaveBeenCalled();
   });
 
   test("does not offer Add for an instrument already on the board", () => {
@@ -311,6 +352,11 @@ describe("LiveTradeWorkspace", () => {
         ])
       )
     );
+    mockReorderItems.mockResolvedValueOnce([
+      makeItem({ itemId: "b", instrumentId: 2, symbol: "BBB", sortOrder: 0 }),
+      makeItem({ itemId: "a", instrumentId: 1, symbol: "AAA", sortOrder: 1 }),
+      makeItem({ itemId: "c", instrumentId: 3, symbol: "CCC", sortOrder: 2 }),
+    ]);
 
     render(<LiveTradeWorkspace authMarket={null} />);
     await act(async () => {
@@ -319,7 +365,8 @@ describe("LiveTradeWorkspace", () => {
     });
 
     expect(mockReorderItems).toHaveBeenCalledWith(["b", "a", "c"]);
-    expect(mockRefetch).toHaveBeenCalled();
+    expect(mockApplyBoard).toHaveBeenCalledTimes(1);
+    expect(mockRefetch).not.toHaveBeenCalled();
   });
 
   test("a quote failure leaves the board rendered and labels retained data stale", () => {
@@ -412,6 +459,60 @@ describe("LiveTradeWorkspace", () => {
     });
 
     expect(mockDeleteItem).toHaveBeenCalledWith("i1", 1);
-    expect(mockRefetch).toHaveBeenCalled();
+    expect(mockApplyBoard).toHaveBeenCalledTimes(1);
+    expect(mockRefetch).not.toHaveBeenCalled();
+  });
+
+  test("offers a zone retry action when summaries fail", () => {
+    mockBoardHook.mockReturnValue(
+      boardState(
+        makeBoard([
+          makeItem({ itemId: "i1", instrumentId: 1, symbol: "INFY" }),
+        ])
+      )
+    );
+    mockZonesHook.mockReturnValue({
+      summaries: new Map(),
+      loading: false,
+      error: Object.assign(new Error("Zone summaries failed."), {
+        status: 500,
+        code: "INTERNAL",
+      }),
+      reload: mockReloadZones,
+    });
+
+    render(<LiveTradeWorkspace authMarket={null} />);
+
+    expect(
+      screen.getByText(/Live zone summaries could not be loaded/)
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Retry zones" }));
+    expect(mockReloadZones).toHaveBeenCalledTimes(1);
+  });
+
+  test("disables the zone retry while a retry is in progress", () => {
+    mockBoardHook.mockReturnValue(
+      boardState(
+        makeBoard([
+          makeItem({ itemId: "i1", instrumentId: 1, symbol: "INFY" }),
+        ])
+      )
+    );
+    mockZonesHook.mockReturnValue({
+      summaries: new Map(),
+      loading: true,
+      error: Object.assign(new Error("Zone summaries failed."), {
+        status: 500,
+        code: "INTERNAL",
+      }),
+      reload: mockReloadZones,
+    });
+
+    render(<LiveTradeWorkspace authMarket={null} />);
+
+    const retry = screen.getByRole("button", { name: "Retry zones" });
+    expect((retry as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(retry);
+    expect(mockReloadZones).not.toHaveBeenCalled();
   });
 });

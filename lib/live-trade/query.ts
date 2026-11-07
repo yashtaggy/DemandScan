@@ -65,6 +65,21 @@ export function parseInstrumentIdList(
   return ids;
 }
 
+export interface BoardQuery {
+  /** When false the board omits structural-zone summaries. */
+  includeZones: boolean;
+}
+
+/**
+ * `/board` defaults to the complete workspace. A client that renders zone
+ * evidence separately can ask for the shell only, skipping the coverage work.
+ */
+export function parseBoardQuery(searchParams: URLSearchParams): BoardQuery {
+  const raw = searchParams.get("includeZones");
+  if (raw === null) return { includeZones: true };
+  return { includeZones: parseBoolean(raw, "includeZones") };
+}
+
 export interface QuoteQuery {
   /** `undefined` means every instrument on the owner's board. */
   instrumentIds?: number[];
@@ -82,6 +97,8 @@ export interface ZoneListQuery {
   hasTimeframeOverride: boolean;
   timeframeOverride: LiveTradeTimeframe | null;
   includeExpanded: boolean;
+  /** When false only the expanded page is produced. */
+  includeSummaries: boolean;
   limit: number;
   offset: number;
 }
@@ -136,6 +153,11 @@ export function parseZoneListQuery(searchParams: URLSearchParams): ZoneListQuery
     searchParams.get("includeExpanded"),
     "includeExpanded"
   );
+  const includeSummariesRaw = searchParams.get("includeSummaries");
+  const includeSummaries =
+    includeSummariesRaw === null
+      ? true
+      : parseBoolean(includeSummariesRaw, "includeSummaries");
 
   const limit = parseBoundedInteger(
     searchParams.get("limit"),
@@ -163,6 +185,7 @@ export function parseZoneListQuery(searchParams: URLSearchParams): ZoneListQuery
     hasTimeframeOverride: timeframe.present,
     timeframeOverride: timeframe.value,
     includeExpanded,
+    includeSummaries,
     limit,
     offset,
   };

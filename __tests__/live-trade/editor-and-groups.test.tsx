@@ -212,7 +212,7 @@ describe("GroupManager", () => {
       for (let i = 0; i < 8; i += 1) await Promise.resolve();
     });
 
-    expect(props.onReorder).toHaveBeenCalledWith(["g2", "g1"]);
+    expect(props.onReorder).toHaveBeenCalledWith("g1", "down");
   });
 
   test("deleting a group explains that instruments become ungrouped", async () => {

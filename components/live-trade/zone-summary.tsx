@@ -25,6 +25,10 @@ interface ZoneSummaryProps {
   quote: LiveTradeQuoteDto | null | undefined;
   zonesAvailable: boolean;
   displayState: QuoteDisplayState;
+  /** The summary request is still in flight and no summary exists yet. */
+  zonesLoading?: boolean;
+  /** The summary request failed; prices and plans are unaffected. */
+  zonesError?: boolean;
 }
 
 function StructuralZone({
@@ -124,9 +128,13 @@ export function ZoneSummary({
   quote,
   zonesAvailable,
   displayState,
+  zonesLoading = false,
+  zonesError = false,
 }: ZoneSummaryProps) {
   const coverage = summary?.coverage ?? "UNKNOWN";
   const freshness = summary?.zoneFreshness;
+  const structuralLoading = summary === undefined && zonesLoading;
+  const structuralError = summary === undefined && zonesError;
 
   const hasCurrentQuote =
     displayState === "current" &&
@@ -143,7 +151,17 @@ export function ZoneSummary({
         <p className="text-[10px] uppercase tracking-wider text-slate-600">
           Scanner structure
         </p>
-        <CoverageBadge coverage={coverage} />
+        {structuralLoading ? (
+          <span role="status" className="text-[10px] text-slate-500">
+            Loading zones…
+          </span>
+        ) : structuralError ? (
+          <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-300">
+            Zones unavailable
+          </span>
+        ) : (
+          <CoverageBadge coverage={coverage} />
+        )}
         {summary?.preferredTimeframe && (
           <span className="text-[10px] text-slate-500">
             Preferred {summary.preferredTimeframe}
@@ -151,19 +169,45 @@ export function ZoneSummary({
         )}
       </div>
 
-      <p className="text-[10px] text-slate-500">
-        {freshness?.latestCoveringScanAt
-          ? `Latest covering scan ${formatDateOnly(freshness.latestCoveringScanAt)}`
-          : "No completed scan covering this instrument"}
-        {freshness
-          ? ` · ${freshness.zoneCount} zones (${freshness.activeZoneCount} active)`
-          : ""}
-      </p>
+      {structuralLoading ? (
+        <div
+          className="grid gap-1.5"
+          aria-busy="true"
+          aria-label="Loading scanner zones"
+        >
+          <div className="h-16 animate-pulse rounded-lg bg-slate-700/25" />
+          <div className="h-16 animate-pulse rounded-lg bg-slate-700/25" />
+        </div>
+      ) : (
+        <>
+          {structuralError ? (
+            <p className="text-[10px] text-amber-400/80">
+              Scanner zones could not be loaded. Plans and prices are
+              unaffected.
+            </p>
+          ) : (
+            <p className="text-[10px] text-slate-500">
+              {freshness?.latestCoveringScanAt
+                ? `Latest covering scan ${formatDateOnly(freshness.latestCoveringScanAt)}`
+                : "No completed scan covering this instrument"}
+              {freshness
+                ? ` · ${freshness.zoneCount} zones (${freshness.activeZoneCount} active)`
+                : ""}
+            </p>
+          )}
 
-      <div className="grid gap-1.5">
-        <StructuralZone zone={summary?.nearestDemand ?? null} side="DEMAND" />
-        <StructuralZone zone={summary?.nearestSupply ?? null} side="SUPPLY" />
-      </div>
+          <div className="grid gap-1.5">
+            <StructuralZone
+              zone={summary?.nearestDemand ?? null}
+              side="DEMAND"
+            />
+            <StructuralZone
+              zone={summary?.nearestSupply ?? null}
+              side="SUPPLY"
+            />
+          </div>
+        </>
+      )}
 
       <div className="rounded-lg border border-slate-700/30 bg-slate-900/30 px-2.5 py-1.5">
         <p className="text-[10px] uppercase tracking-wider text-slate-600">
@@ -200,7 +244,7 @@ export function ZoneSummary({
         )}
       </div>
 
-      {coverage !== "AVAILABLE" && (
+      {coverage !== "AVAILABLE" && !structuralLoading && !structuralError && (
         <p className="text-[10px] leading-relaxed text-slate-500">
           {coverage === "STALE"
             ? `Scan data is older than the ${freshness?.freshnessThresholdDays ?? 7}-day freshness window.`
