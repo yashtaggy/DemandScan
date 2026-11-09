@@ -855,6 +855,24 @@ describe("board zone summaries", () => {
     ).toHaveLength(1);
   });
 
+  it("collapses repeated trade entries into one instrument summary", async () => {
+    mockFake.seedItem({ owner: "owner-a", instrumentId: 1, timeframe: "1H" });
+    mockFake.seedZone({ instrumentId: 1, side: "DEMAND", proximal: 100, score: 44 });
+    mockFake.seedScanJob({
+      status: "SUCCESS",
+      completedAt: new Date(),
+      instrumentIds: [1],
+    });
+
+    const board = await getBoard(OWNER_A);
+
+    expect(board.items).toHaveLength(3);
+    expect(board.zones.summaries.map((row) => row.instrumentId)).toEqual([1, 2]);
+    expect(
+      mockFake.standaloneMarkers.filter((marker) => marker === "zones:nearest")
+    ).toHaveLength(1);
+  });
+
   it("loads no zone data for an empty board", async () => {
     mockFake.reset();
     const board = await getBoard(OWNER_A);
@@ -897,6 +915,19 @@ describe("expanded zones", () => {
       "INVALID_QUERY"
     );
     expect(mockFake.standaloneMarkers).toEqual(["list-quote-instruments"]);
+  });
+
+  it("treats repeated entries for one instrument as a single selection", async () => {
+    mockFake.seedItem({ owner: "owner-a", instrumentId: 1, timeframe: "1H" });
+
+    const result = await getZoneOverviewsAt(
+      NOW,
+      OWNER_A,
+      options({ instrumentIds: [1], includeExpanded: true })
+    );
+
+    expect(result.summaries.map((row) => row.instrumentId)).toEqual([1]);
+    expect(result.expanded?.instrumentId).toBe(1);
   });
 
   it("returns a deterministic page with pagination metadata and no distance", async () => {

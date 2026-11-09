@@ -490,10 +490,12 @@ export async function getBoard(
 
   let summaries: LiveTradeZoneSummaryDto[] = [];
   if (includeZones && items.length > 0) {
-    const selection = items.map((item) => ({
-      instrumentId: item.instrumentId,
-      symbol: item.symbol,
-    }));
+    const selection = dedupeByInstrument(
+      items.map((item) => ({
+        instrumentId: item.instrumentId,
+        symbol: item.symbol,
+      }))
+    );
     const instrumentIds = selection.map((row) => row.instrumentId);
     const [nearestRows, coverageRows] = await Promise.all([
       repository.getNearestZones(ownerId, instrumentIds, null, false),
@@ -622,6 +624,24 @@ function selectRequestedInstruments(
     );
 }
 
+/**
+ * Collapses repeated trade entries for one instrument into a single row.
+ * Quote and zone reads are per instrument, so every entry on the same symbol
+ * shares one quote and one zone summary instead of issuing duplicate work.
+ */
+function dedupeByInstrument<T extends { instrumentId: number }>(
+  rows: T[]
+): T[] {
+  const seen = new Set<number>();
+  const unique: T[] = [];
+  for (const row of rows) {
+    if (seen.has(row.instrumentId)) continue;
+    seen.add(row.instrumentId);
+    unique.push(row);
+  }
+  return unique;
+}
+
 export async function getLiveQuotes(
   ownerId: LiveTradeOwnerId,
   session: KiteSession,
@@ -676,9 +696,11 @@ export async function getLiveQuotesAt(
   if (accessToken === "") throw new LiveTradeError("TOKEN_EXPIRED");
 
   const requested = validateRequestedInstrumentIds(requestedInstrumentIds);
-  const selection = selectRequestedInstruments(
-    await repository.listOwnerQuoteInstruments(ownerId),
-    requested
+  const selection = dedupeByInstrument(
+    selectRequestedInstruments(
+      await repository.listOwnerQuoteInstruments(ownerId),
+      requested
+    )
   );
 
   if (selection.length === 0) {
@@ -884,9 +906,11 @@ export async function getZoneOverviewsAt(
   assertOwner(ownerId);
 
   const requested = validateRequestedInstrumentIds(options.instrumentIds);
-  const selection = selectRequestedInstruments(
-    await repository.listOwnerQuoteInstruments(ownerId),
-    requested
+  const selection = dedupeByInstrument(
+    selectRequestedInstruments(
+      await repository.listOwnerQuoteInstruments(ownerId),
+      requested
+    )
   );
 
   const timeframeContext = {

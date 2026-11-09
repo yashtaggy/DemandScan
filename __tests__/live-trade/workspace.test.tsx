@@ -37,7 +37,8 @@ jest.mock("@/hooks/use-live-trade-zone-summaries", () => ({
 }));
 
 jest.mock("@/hooks/use-live-trade-quotes", () => ({
-  useLiveTradeQuotes: () => mockQuotesHook(),
+  useLiveTradeQuotes: (instrumentIds: number[], enabled: boolean) =>
+    mockQuotesHook(instrumentIds, enabled),
 }));
 
 jest.mock("@/hooks/use-instrument-search", () => ({
@@ -196,7 +197,7 @@ describe("LiveTradeWorkspace", () => {
     expect(screen.getByText("Your board is empty")).toBeTruthy();
     expect(screen.getByText("Add instruments")).toBeTruthy();
     expect(screen.getByLabelText("Search NSE instruments to add")).toBeTruthy();
-    expect(screen.getByText(/0 tracked instruments/)).toBeTruthy();
+    expect(screen.getByText(/0 tracked trade entries/)).toBeTruthy();
   });
 
   test("adds a searched instrument without reloading the whole board", async () => {
@@ -246,7 +247,7 @@ describe("LiveTradeWorkspace", () => {
     expect(mockRefetch).not.toHaveBeenCalled();
   });
 
-  test("does not offer Add for an instrument already on the board", () => {
+  test("offers a fresh entry for an instrument already on the board", async () => {
     mockBoardHook.mockReturnValue(
       boardState(
         makeBoard([
@@ -271,16 +272,104 @@ describe("LiveTradeWorkspace", () => {
       loading: false,
       error: null,
     }));
+    mockCreateItem.mockResolvedValueOnce(
+      makeItem({ itemId: "i2", instrumentId: 408065, symbol: "INFY" })
+    );
 
     render(<LiveTradeWorkspace authMarket={null} />);
     fireEvent.change(screen.getByLabelText("Search NSE instruments to add"), {
       target: { value: "infy" },
     });
 
-    expect(screen.getByText("On board")).toBeTruthy();
-    expect(
-      screen.queryByRole("button", { name: "Add INFY to watchlist" })
-    ).toBeNull();
+    expect(screen.getByText("1 entry on board")).toBeTruthy();
+    const add = screen.getByRole("button", {
+      name: "Add another INFY trade entry",
+    });
+
+    await act(async () => {
+      fireEvent.click(add);
+      for (let i = 0; i < 8; i += 1) await Promise.resolve();
+    });
+
+    // The repeat add is a normal create: no instrument is edited and the
+    // returned row is appended like any other entry.
+    expect(mockUpdateItem).not.toHaveBeenCalled();
+    expect(mockCreateItem).toHaveBeenCalledWith({
+      instrumentId: 408065,
+      groupId: null,
+    });
+    expect(mockApplyBoard).toHaveBeenCalledTimes(1);
+  });
+
+  test("renders repeated entries as independent rows sharing one quote", () => {
+    const first = makeItem({
+      itemId: "gold-1",
+      instrumentId: 1001,
+      symbol: "GOLD",
+      createdAt: "2026-11-09T04:00:00.000Z",
+      priority: "HIGH",
+      direction: "BUY",
+      entryPrice: 72000,
+      targetPrice: 74000,
+      stopLoss: 71000,
+      notes: "first plan",
+    });
+    const second = makeItem({
+      itemId: "gold-2",
+      instrumentId: 1001,
+      symbol: "GOLD",
+      createdAt: "2026-11-09T06:00:00.000Z",
+      priority: "LOW",
+      direction: "SELL",
+      entryPrice: 73000,
+      targetPrice: 71000,
+      stopLoss: 74000,
+      notes: "second plan",
+    });
+    const infy = makeItem({
+      itemId: "infy-1",
+      instrumentId: 3,
+      symbol: "INFY",
+    });
+
+    mockBoardHook.mockReturnValue(
+      boardState(makeBoard([first, second, infy]))
+    );
+    mockQuotesHook.mockReturnValue(
+      quoteState({
+        quotes: {
+          1001: {
+            instrumentId: 1001,
+            symbol: "GOLD",
+            lastPrice: 72500.5,
+            change: 100,
+            changePercent: 0.14,
+            lastTradedAt: null,
+            fetchedAt: "2026-11-09T06:30:00.000Z",
+            freshness: "LIVE",
+            errorCode: null,
+            nearestDemand: null,
+            nearestSupply: null,
+          },
+        },
+      })
+    );
+
+    render(<LiveTradeWorkspace authMarket={null} />);
+
+    // Rows are keyed and addressable by item id, never by instrument or symbol.
+    expect(screen.getByTestId("watchlist-item-gold-1")).toBeTruthy();
+    expect(screen.getByTestId("watchlist-item-gold-2")).toBeTruthy();
+    expect(screen.getByTestId("watchlist-item-infy-1")).toBeTruthy();
+    expect(screen.getByText("#1")).toBeTruthy();
+    expect(screen.getByText("#2")).toBeTruthy();
+    expect(screen.getByText("3 tracked trade entries")).toBeTruthy();
+    expect(screen.getByText("first plan")).toBeTruthy();
+    expect(screen.getByText("second plan")).toBeTruthy();
+
+    // One quote request for the shared instrument, not one per entry.
+    expect(mockQuotesHook).toHaveBeenLastCalledWith([1001, 3], true);
+    expect(screen.getAllByText("₹72,500.50")).toHaveLength(2);
   });
 
   test("filters by group and priority without hiding the total", () => {
@@ -317,14 +406,14 @@ describe("LiveTradeWorkspace", () => {
     );
 
     render(<LiveTradeWorkspace authMarket={null} />);
-    expect(screen.getByTestId("watchlist-item-INFY")).toBeTruthy();
-    expect(screen.getByTestId("watchlist-item-TCS")).toBeTruthy();
+    expect(screen.getByTestId("watchlist-item-i1")).toBeTruthy();
+    expect(screen.getByTestId("watchlist-item-i2")).toBeTruthy();
 
     fireEvent.change(screen.getByLabelText("Filter watchlist by group"), {
       target: { value: "g1" },
     });
-    expect(screen.getByTestId("watchlist-item-INFY")).toBeTruthy();
-    expect(screen.queryByTestId("watchlist-item-TCS")).toBeNull();
+    expect(screen.getByTestId("watchlist-item-i1")).toBeTruthy();
+    expect(screen.queryByTestId("watchlist-item-i2")).toBeNull();
     expect(screen.getByText("Showing 1 of 2")).toBeTruthy();
 
     fireEvent.change(screen.getByLabelText("Filter watchlist by group"), {
@@ -333,13 +422,13 @@ describe("LiveTradeWorkspace", () => {
     fireEvent.change(screen.getByLabelText("Filter watchlist by priority"), {
       target: { value: "LOW" },
     });
-    expect(screen.queryByTestId("watchlist-item-INFY")).toBeNull();
-    expect(screen.getByTestId("watchlist-item-TCS")).toBeTruthy();
+    expect(screen.queryByTestId("watchlist-item-i1")).toBeNull();
+    expect(screen.getByTestId("watchlist-item-i2")).toBeTruthy();
 
     fireEvent.change(screen.getByLabelText("Filter watchlist by priority"), {
       target: { value: "HIGH" },
     });
-    expect(screen.getByTestId("watchlist-item-INFY")).toBeTruthy();
+    expect(screen.getByTestId("watchlist-item-i1")).toBeTruthy();
   });
 
   test("sends the full item order when moving within a filtered list", async () => {
@@ -405,7 +494,7 @@ describe("LiveTradeWorkspace", () => {
 
     render(<LiveTradeWorkspace authMarket={null} />);
 
-    expect(screen.getByTestId("watchlist-item-INFY")).toBeTruthy();
+    expect(screen.getByTestId("watchlist-item-i1")).toBeTruthy();
     expect(screen.getByText(/Your board data is unaffected/)).toBeTruthy();
     expect(screen.getByText(/Retained snapshot/)).toBeTruthy();
   });
@@ -431,7 +520,7 @@ describe("LiveTradeWorkspace", () => {
     expect(
       screen.getByRole("button", { name: "Reconnect Zerodha" })
     ).toBeTruthy();
-    expect(screen.getByTestId("watchlist-item-INFY")).toBeTruthy();
+    expect(screen.getByTestId("watchlist-item-i1")).toBeTruthy();
   });
 
   test("deletes only after confirmation and sends the item version", async () => {
@@ -449,7 +538,7 @@ describe("LiveTradeWorkspace", () => {
     );
 
     expect(
-      screen.getByText("Remove INFY from your board?")
+      screen.getByText("Remove INFY trade entry?")
     ).toBeTruthy();
     expect(mockDeleteItem).not.toHaveBeenCalled();
 

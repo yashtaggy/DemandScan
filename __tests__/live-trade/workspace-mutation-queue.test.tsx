@@ -231,9 +231,7 @@ async function flush() {
 function visibleSymbols(): string[] {
   return screen
     .getAllByTestId(/^watchlist-item-/)
-    .map((node) =>
-      (node.getAttribute("data-testid") ?? "").replace("watchlist-item-", "")
-    );
+    .map((node) => node.getAttribute("data-symbol") ?? "");
 }
 
 function optionLabels(select: HTMLElement): string[] {

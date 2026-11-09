@@ -440,12 +440,16 @@ describe("items", () => {
     expect(mockFake.itemById(created.itemId)?.timeframe).toBeNull();
   });
 
-  it("rejects a duplicate instrument for the same owner", async () => {
-    await createItem(OWNER_A, itemInput({ instrumentId: 1 }));
-    await expectLiveTradeError(
-      createItem(OWNER_A, itemInput({ instrumentId: 1 })),
-      "DUPLICATE_ITEM"
-    );
+  it("allows the same instrument twice for the same owner", async () => {
+    const first = await createItem(OWNER_A, itemInput({ instrumentId: 1 }));
+    const second = await createItem(OWNER_A, itemInput({ instrumentId: 1 }));
+
+    expect(second.itemId).not.toBe(first.itemId);
+    expect(second.instrumentId).toBe(1);
+    expect(second.sortOrder).toBe(first.sortOrder + 1);
+    expect(
+      mockFake.items.filter((item) => item.owner_user_id === OWNER_A_RAW)
+    ).toHaveLength(2);
   });
 
   it("allows the same instrument for different owners", async () => {
@@ -1318,10 +1322,247 @@ describe("SQL contracts", () => {
   });
 });
 
+// ─── Repeated entries for one instrument ─────────────────────────────────────
+
+describe("repeated entries for the same instrument", () => {
+  async function threeGoldEntries() {
+    const first = await createItem(
+      OWNER_A,
+      itemInput({
+        instrumentId: 1,
+        priority: "HIGH",
+        direction: "BUY",
+        entryPrice: 100,
+        targetPrice: 120,
+        stopLoss: 90,
+        notes: "first",
+        tradeStatus: "WATCHING",
+      })
+    );
+    const second = await createItem(
+      OWNER_A,
+      itemInput({
+        instrumentId: 1,
+        priority: "MEDIUM",
+        direction: "SELL",
+        entryPrice: 200,
+        targetPrice: 180,
+        stopLoss: 210,
+        notes: "second",
+        tradeStatus: "ACTIVE_TRADE",
+      })
+    );
+    const third = await createItem(
+      OWNER_A,
+      itemInput({
+        instrumentId: 1,
+        priority: "LOW",
+        direction: null,
+        entryPrice: 300,
+        targetPrice: null,
+        stopLoss: null,
+        notes: "third",
+        tradeStatus: "CLOSED",
+      })
+    );
+    return { first, second, third };
+  }
+
+  it("stores three independent entries for one instrument", async () => {
+    const { first, second, third } = await threeGoldEntries();
+
+    expect(new Set([first.itemId, second.itemId, third.itemId]).size).toBe(3);
+
+    const items = await listItems(OWNER_A);
+    expect(items.map((item) => item.itemId)).toEqual([
+      first.itemId,
+      second.itemId,
+      third.itemId,
+    ]);
+    expect(items.map((item) => item.instrumentId)).toEqual([1, 1, 1]);
+    expect(items.map((item) => item.direction)).toEqual(["BUY", "SELL", null]);
+    expect(items.map((item) => item.entryPrice)).toEqual([100, 200, 300]);
+    expect(items.map((item) => item.notes)).toEqual(["first", "second", "third"]);
+    expect(items.map((item) => item.tradeStatus)).toEqual([
+      "WATCHING",
+      "ACTIVE_TRADE",
+      "CLOSED",
+    ]);
+    expect(items.map((item) => item.version)).toEqual([1, 1, 1]);
+  });
+
+  it("updates the addressed entry without touching its siblings", async () => {
+    const { first, second, third } = await threeGoldEntries();
+
+    const updated = await updateItem(OWNER_A, second.itemId, {
+      version: second.version,
+      priority: "HIGH",
+      entryPrice: 250,
+      notes: "second revised",
+    });
+    expect(updated.version).toBe(2);
+
+    const items = await listItems(OWNER_A);
+    const byId = new Map(items.map((item) => [item.itemId, item]));
+    expect(byId.get(first.itemId)).toEqual(first);
+    expect(byId.get(third.itemId)).toEqual(third);
+    expect(byId.get(second.itemId)?.notes).toBe("second revised");
+    expect(byId.get(second.itemId)?.entryPrice).toBe(250);
+    expect(byId.get(second.itemId)?.direction).toBe("SELL");
+  });
+
+  it("deletes the addressed entry without touching its siblings", async () => {
+    const { first, second, third } = await threeGoldEntries();
+
+    await deleteItem(OWNER_A, second.itemId, second.version);
+
+    const items = await listItems(OWNER_A);
+    expect(items.map((item) => item.itemId)).toEqual([
+      first.itemId,
+      third.itemId,
+    ]);
+    expect(items.every((item) => item.instrumentId === 1)).toBe(true);
+    expect(mockFake.itemById(first.itemId)?.version).toBe(1);
+    expect(mockFake.itemById(third.itemId)?.version).toBe(1);
+  });
+
+  it("reorders several entries that reference the same instrument", async () => {
+    const { first, second, third } = await threeGoldEntries();
+
+    const reordered = await reorderItems(OWNER_A, [
+      third.itemId,
+      first.itemId,
+      second.itemId,
+    ]);
+
+    expect(reordered.map((item) => item.itemId)).toEqual([
+      third.itemId,
+      first.itemId,
+      second.itemId,
+    ]);
+    expect(reordered.map((item) => item.instrumentId)).toEqual([1, 1, 1]);
+    expect(reordered.map((item) => item.version)).toEqual([2, 2, 2]);
+  });
+
+  it("assigns groups independently to repeated entries", async () => {
+    const swing = await createGroup(OWNER_A, "Swing");
+    const intraday = await createGroup(OWNER_A, "Intraday");
+
+    const first = await createItem(
+      OWNER_A,
+      itemInput({ instrumentId: 1, groupId: swing.groupId })
+    );
+    const second = await createItem(
+      OWNER_A,
+      itemInput({ instrumentId: 1, groupId: intraday.groupId })
+    );
+
+    expect(first.groupId).toBe(swing.groupId);
+    expect(second.groupId).toBe(intraday.groupId);
+
+    const moved = await updateItem(OWNER_A, second.itemId, {
+      version: second.version,
+      groupId: null,
+    });
+    expect(moved.groupId).toBeNull();
+
+    const items = await listItems(OWNER_A);
+    expect(items.find((item) => item.itemId === first.itemId)?.groupId).toBe(
+      swing.groupId
+    );
+    expect(items.find((item) => item.itemId === second.itemId)?.groupId).toBeNull();
+  });
+
+  it("isolates repeated entries between owners", async () => {
+    const { second } = await threeGoldEntries();
+    await createItem(OWNER_B, itemInput({ instrumentId: 1 }));
+
+    await expectLiveTradeError(
+      updateItem(OWNER_B, second.itemId, { version: 1, notes: "stolen" }),
+      "NOT_FOUND"
+    );
+    await expectLiveTradeError(
+      deleteItem(OWNER_B, second.itemId, 1),
+      "NOT_FOUND"
+    );
+
+    expect(mockFake.itemById(second.itemId)?.owner_user_id).toBe(OWNER_A_RAW);
+    expect(mockFake.itemById(second.itemId)?.notes).toBe("second");
+  });
+
+  it("lets different owners create repeats independently", async () => {
+    const a1 = await createItem(OWNER_A, itemInput({ instrumentId: 1 }));
+    const a2 = await createItem(OWNER_A, itemInput({ instrumentId: 1 }));
+    const b1 = await createItem(OWNER_B, itemInput({ instrumentId: 1 }));
+    const b2 = await createItem(OWNER_B, itemInput({ instrumentId: 1 }));
+
+    expect(new Set([a1.itemId, a2.itemId, b1.itemId, b2.itemId]).size).toBe(4);
+    expect(await listItems(OWNER_A)).toHaveLength(2);
+    expect(await listItems(OWNER_B)).toHaveLength(2);
+  });
+
+  it("counts every repeated entry toward the 200-entry limit", async () => {
+    for (let index = 0; index < 199; index += 1) {
+      mockFake.seedItem({
+        owner: OWNER_A_RAW,
+        instrumentId: index % 2 === 0 ? 1 : 2,
+      });
+    }
+
+    const twoHundredth = await createItem(
+      OWNER_A,
+      itemInput({ instrumentId: 1 })
+    );
+    expect(twoHundredth.instrumentId).toBe(1);
+
+    await expectLiveTradeError(
+      createItem(OWNER_A, itemInput({ instrumentId: 1 })),
+      "ITEM_LIMIT"
+    );
+    await expectLiveTradeError(
+      createItem(OWNER_A, itemInput({ instrumentId: 3 })),
+      "ITEM_LIMIT"
+    );
+    expect(
+      mockFake.items.filter((item) => item.owner_user_id === OWNER_A_RAW)
+    ).toHaveLength(200);
+  });
+
+  it("serializes concurrent additions of the same instrument at the limit", async () => {
+    for (let index = 0; index < 199; index += 1) {
+      mockFake.seedItem({
+        owner: OWNER_A_RAW,
+        instrumentId: index % 2 === 0 ? 1 : 2,
+      });
+    }
+
+    const attempts = await Promise.allSettled(
+      Array.from({ length: 6 }, () =>
+        createItem(OWNER_A, itemInput({ instrumentId: 1 }))
+      )
+    );
+
+    expect(
+      attempts.filter((result) => result.status === "fulfilled")
+    ).toHaveLength(1);
+    for (const rejection of attempts.filter(
+      (result): result is PromiseRejectedResult => result.status === "rejected"
+    )) {
+      expect((rejection.reason as LiveTradeError).code).toBe("ITEM_LIMIT");
+    }
+    expect(
+      mockFake.items.filter((item) => item.owner_user_id === OWNER_A_RAW)
+    ).toHaveLength(200);
+    expect(mockFake.maxConcurrentPerOwner).toBe(1);
+  });
+});
+
 // ─── Error sanitation ────────────────────────────────────────────────────────
 
 describe("database error sanitation", () => {
-  it("maps the item unique constraint to DUPLICATE_ITEM", async () => {
+  it("sanitizes the retired duplicate-instrument constraint as INTERNAL", async () => {
+    // The 2026-11-09 migration drops this index. If an unmigrated database
+    // still reports it, the API must not resurrect the removed 409 contract.
     mockFake.failOnce(
       "create-item:insert",
       Object.assign(new Error("simulated"), {
@@ -1332,7 +1573,7 @@ describe("database error sanitation", () => {
 
     await expectLiveTradeError(
       createItem(OWNER_A, itemInput({ instrumentId: 1 })),
-      "DUPLICATE_ITEM"
+      "INTERNAL"
     );
   });
 

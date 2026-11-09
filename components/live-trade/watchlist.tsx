@@ -12,6 +12,12 @@ import { WatchlistRow } from "./watchlist-row";
 
 interface WatchlistProps {
   items: LiveTradeItemDto[];
+  /**
+   * 1-based repeat-entry number per item id, computed over the full board so a
+   * filter cannot renumber the rows. Items with a single instrument entry are
+   * absent from the map.
+   */
+  entryNumbers: ReadonlyMap<string, number>;
   groups: LiveTradeGroupDto[];
   summaries: Map<number, LiveTradeZoneSummaryDto>;
   quotes: Record<number, LiveTradeQuoteDto>;
@@ -30,6 +36,7 @@ interface WatchlistProps {
 
 export function Watchlist({
   items,
+  entryNumbers,
   groups,
   summaries,
   quotes,
@@ -69,6 +76,7 @@ export function Watchlist({
           <WatchlistRow
             key={item.itemId}
             item={item}
+            entryNumber={entryNumbers.get(item.itemId) ?? null}
             groupName={
               item.groupId ? groupNames.get(item.groupId) ?? null : null
             }

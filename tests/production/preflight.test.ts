@@ -185,12 +185,12 @@ describe("production preflight state detection", () => {
     const result = await runPreflight(
       buildCatalog({
         tables: ALL_TABLES,
-        missingIndexes: new Set(["live_trade_items_owner_instrument_uq"]),
+        missingIndexes: new Set(["live_trade_items_owner_sort_idx"]),
       })
     );
     expect(result.status).toBe("BLOCKED_INCOMPATIBLE");
     expect(result.liveTrade.missingIndexes).toContain(
-      "live_trade_items_owner_instrument_uq"
+      "live_trade_items_owner_sort_idx"
     );
     expect(decideAction(result.status).write).toBe(false);
   });

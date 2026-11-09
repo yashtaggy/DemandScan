@@ -1,0 +1,30 @@
+-- 2026-11-09 Allow multiple Live Trade entries for one instrument.
+--
+-- A trade entry is identified by its own item_id. The original schema also
+-- enforced one row per (owner_user_id, instrument_id), which prevented a user
+-- from recording a second independent trade in the same instrument on the same
+-- day. This migration removes only that uniqueness index:
+--
+--   * No table, column, row, note, price, status, timestamp or version changes.
+--   * No data is deleted, merged or rewritten.
+--   * Existing item IDs, group relationships and the composite
+--     (group_id, owner_user_id) foreign key are untouched.
+--   * The 200-item and 20-group limits are enforced by the service/repository
+--     against live_trade_items / live_trade_groups row counts, so they keep
+--     counting each trade entry separately.
+--   * The owner/sort, owner/group and instrument indexes are retained; they
+--     already cover the board, group and quote/zone access patterns, so no
+--     additional index is introduced.
+--
+-- Idempotent: DROP INDEX IF EXISTS is safe to re-run. This file is applied
+-- after 2026-11-06-add-live-trade.sql by the ordered migration runner and must
+-- be applied before deploying application code that creates repeated entries.
+-- It must not be executed against production by this repository's validation
+-- tasks.
+--
+-- No trade_date column is introduced. `created_at` (TIMESTAMPTZ, stored in UTC
+-- and displayed in IST) is the entry timestamp. A separate trade date is not
+-- needed to list entries and must never become a uniqueness key, because
+-- several trades in the same instrument on the same date are valid.
+
+DROP INDEX IF EXISTS live_trade_items_owner_instrument_uq;

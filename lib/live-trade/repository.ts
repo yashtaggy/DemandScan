@@ -172,10 +172,6 @@ function mapDbError(
   return new LiveTradeError("INTERNAL");
 }
 
-const ITEM_UNIQUE_CONSTRAINTS = {
-  live_trade_items_owner_instrument_uq: "DUPLICATE_ITEM",
-} as const;
-
 const GROUP_UNIQUE_CONSTRAINTS = {
   live_trade_groups_owner_name_uq: "DUPLICATE_GROUP",
 } as const;
@@ -570,10 +566,6 @@ export async function createItem(
                  WHERE g.group_id = $3 AND g.owner_user_id = $2
                ))
            AND (SELECT count(*) FROM live_trade_items WHERE owner_user_id = $2) < ${LIVE_TRADE_ITEM_LIMIT}
-           AND NOT EXISTS (
-                 SELECT 1 FROM live_trade_items x
-                 WHERE x.owner_user_id = $2 AND x.instrument_id = $12
-               )
          RETURNING item_id`,
         [
           itemId,
@@ -604,11 +596,7 @@ export async function createItem(
              SELECT 1 FROM live_trade_groups g
              WHERE g.group_id = $2 AND g.owner_user_id = $1
            )) AS group_owned,
-           (SELECT count(*) FROM live_trade_items WHERE owner_user_id = $1) AS item_count,
-           EXISTS (
-             SELECT 1 FROM live_trade_items x
-             WHERE x.owner_user_id = $1 AND x.instrument_id = $3
-           ) AS instrument_owned
+           (SELECT count(*) FROM live_trade_items WHERE owner_user_id = $1) AS item_count
          FROM (SELECT 1 AS seed) s
          LEFT JOIN instruments inst ON inst.instrument_id = $3`,
         [ownerId, input.groupId, input.instrumentId]
@@ -623,7 +611,7 @@ export async function createItem(
       ),
     ]);
   } catch (error) {
-    throw mapDbError(error, ITEM_UNIQUE_CONSTRAINTS);
+    throw mapDbError(error);
   }
 
   const [, inserted, classification, readBack] = results;
@@ -635,7 +623,6 @@ export async function createItem(
     }
     if (!row.instrument_active) throw new LiveTradeError("INSTRUMENT_INACTIVE");
     if (!row.group_owned) throw new LiveTradeError("INVALID_GROUP");
-    if (row.instrument_owned) throw new LiveTradeError("DUPLICATE_ITEM");
     if (toNumber(row.item_count) >= LIVE_TRADE_ITEM_LIMIT) {
       throw new LiveTradeError("ITEM_LIMIT");
     }
@@ -730,7 +717,7 @@ export async function updateItem(
       ),
     ]);
   } catch (error) {
-    throw mapDbError(error, ITEM_UNIQUE_CONSTRAINTS);
+    throw mapDbError(error);
   }
 
   const [groupLock, updated, current, readBack] = results;

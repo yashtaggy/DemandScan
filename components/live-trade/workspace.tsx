@@ -192,10 +192,42 @@ export function LiveTradeWorkspace({ authMarket }: LiveTradeWorkspaceProps) {
   const items = useMemo(() => board?.items ?? [], [board]);
   const groups = board?.groups ?? [];
 
-  const instrumentIds = useMemo(
-    () => items.map((item) => item.instrumentId),
-    [items]
-  );
+  const instrumentIds = useMemo(() => {
+    // Repeated entries for one instrument share a quote and a zone summary, so
+    // the market-data requests carry each instrument id only once.
+    const seen = new Set<number>();
+    const ids: number[] = [];
+    for (const item of items) {
+      if (seen.has(item.instrumentId)) continue;
+      seen.add(item.instrumentId);
+      ids.push(item.instrumentId);
+    }
+    return ids;
+  }, [items]);
+
+  // Repeat entries are numbered per instrument in creation order. The number
+  // is computed over the whole board, not the filtered list, so filtering
+  // cannot relabel a row.
+  const entryNumbers = useMemo(() => {
+    const byInstrument = new Map<number, LiveTradeItemDto[]>();
+    for (const item of items) {
+      const list = byInstrument.get(item.instrumentId);
+      if (list) list.push(item);
+      else byInstrument.set(item.instrumentId, [item]);
+    }
+    const numbers = new Map<string, number>();
+    for (const list of byInstrument.values()) {
+      if (list.length < 2) continue;
+      const ordered = [...list].sort((a, b) => {
+        if (a.createdAt !== b.createdAt) {
+          return a.createdAt < b.createdAt ? -1 : 1;
+        }
+        return a.itemId < b.itemId ? -1 : a.itemId > b.itemId ? 1 : 0;
+      });
+      ordered.forEach((item, index) => numbers.set(item.itemId, index + 1));
+    }
+    return numbers;
+  }, [items]);
 
   const {
     quotes,
@@ -257,7 +289,12 @@ export function LiveTradeWorkspace({ authMarket }: LiveTradeWorkspaceProps) {
     instrument: InstrumentSearchResult,
     groupId: string | null
   ) {
-    await runBoardTask(async ({ apply }) => {
+    const result = await runBoardTask(async ({ board: latest, apply }) => {
+      // The entry is always new. Whether the instrument is already present
+      // only decides the wording and whether the fresh plan editor opens.
+      const isRepeat = latest.items.some(
+        (item) => item.instrumentId === instrument.instrumentId
+      );
       const created = await createItem({
         instrumentId: instrument.instrumentId,
         groupId,
@@ -268,9 +305,18 @@ export function LiveTradeWorkspace({ authMarket }: LiveTradeWorkspaceProps) {
         ...previous,
         items: [...previous.items, created],
       }));
+      return { created, isRepeat };
     });
     reloadZones();
-    push("success", `${instrument.symbol} added to your board.`);
+    if (result.isRepeat) {
+      setEditingItemId(result.created.itemId);
+      push(
+        "success",
+        `Another ${instrument.symbol} trade entry was added. Enter this entry's own plan.`
+      );
+    } else {
+      push("success", `${instrument.symbol} added to your board.`);
+    }
   }
 
   async function handleSave(
@@ -329,7 +375,7 @@ export function LiveTradeWorkspace({ authMarket }: LiveTradeWorkspaceProps) {
         }));
       });
       setDeleteItemId(null);
-      push("success", `${target.symbol} removed from your board.`);
+      push("success", `${target.symbol} trade entry removed from your board.`);
     } catch (cause) {
       push("error", liveTradeErrorMessage(cause));
     } finally {
@@ -495,7 +541,7 @@ export function LiveTradeWorkspace({ authMarket }: LiveTradeWorkspaceProps) {
   return (
     <div className="space-y-4">
       <WorkspaceHeader
-        instrumentCount={items.length}
+        entryCount={items.length}
         groupCount={groups.length}
         market={quoteMarket ?? authMarket}
         fetchedAt={fetchedAt}
@@ -672,7 +718,7 @@ export function LiveTradeWorkspace({ authMarket }: LiveTradeWorkspaceProps) {
                   No instruments match these filters.
                 </p>
                 <p className="mt-1 text-xs text-slate-600">
-                  {formatCount(items.length)} instruments are tracked in total.
+                  {formatCount(items.length)} trade entries are tracked in total.
                 </p>
                 {hasFilters && (
                   <Button
@@ -693,6 +739,7 @@ export function LiveTradeWorkspace({ authMarket }: LiveTradeWorkspaceProps) {
             ) : (
               <Watchlist
                 items={filteredItems}
+                entryNumbers={entryNumbers}
                 groups={groups}
                 summaries={summaries}
                 quotes={quotes}
@@ -770,12 +817,12 @@ export function LiveTradeWorkspace({ authMarket }: LiveTradeWorkspaceProps) {
         open={deleteTarget !== null}
         title={
           deleteTarget
-            ? `Remove ${deleteTarget.symbol} from your board?`
-            : "Remove instrument"
+            ? `Remove ${deleteTarget.symbol} trade entry?`
+            : "Remove trade entry"
         }
         description={
           deleteTarget
-            ? `${deleteTarget.symbol} will be removed from your Live Trade board along with its saved plan. Scanner zones and market data are not affected.`
+            ? `This ${deleteTarget.symbol} trade entry will be removed with its saved plan. Other entries for ${deleteTarget.symbol}, scanner zones and market data are not affected.`
             : ""
         }
         confirmLabel="Remove"

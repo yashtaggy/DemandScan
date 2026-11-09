@@ -212,10 +212,7 @@ describe('Live Trade schema contract (2026-11-06)', () => {
     expect(sql).toMatch(/timeframe\s+IS\s+NULL\s+OR\s+timeframe\s+IN/i);
   });
 
-  test('item uniqueness, versioning, notes limit and status enum are present', () => {
-    expect(sql).toMatch(
-      /CREATE\s+UNIQUE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+live_trade_items_owner_instrument_uq[\s\S]*?\(\s*owner_user_id\s*,\s*instrument_id\s*\)/i
-    );
+  test('versioning, notes limit and status enum are present', () => {
     expect(sql).toMatch(
       /live_trade_items_version_pos\s+CHECK\s*\(\s*version\s*>=\s*1\s*\)/i
     );
@@ -247,6 +244,67 @@ describe('Live Trade schema contract (2026-11-06)', () => {
   });
 });
 
+describe('Live Trade repeated-entry migration (2026-11-09)', () => {
+  const migration = loadSqlFiles().find((f) =>
+    f.name.includes('2026-11-09-live-trade-allow-repeat-instruments')
+  );
+  const rawSql = migration?.sql ?? '';
+  const sql = stripCommentLines(rawSql);
+
+  test('the migration exists and only drops the legacy uniqueness index', () => {
+    expect(migration).toBeDefined();
+    expect(sql).toMatch(
+      /DROP\s+INDEX\s+IF\s+EXISTS\s+live_trade_items_owner_instrument_uq\s*;/i
+    );
+    expect(sql).not.toMatch(/\bDROP\s+TABLE\b/i);
+    expect(sql).not.toMatch(/\bTRUNCATE\b/i);
+    expect(sql).not.toMatch(/\bDELETE\s+FROM\b/i);
+    expect(sql).not.toMatch(/\bALTER\s+TABLE\b/i);
+    expect(sql).not.toMatch(/\bUPDATE\s+live_trade_items\b/i);
+    expect(sql).not.toMatch(/\bINSERT\s+INTO\b/i);
+  });
+
+  test('no trade_date column or date-based uniqueness is introduced', () => {
+    expect(sql).not.toMatch(/trade_date/i);
+    expect(sql).not.toMatch(/UNIQUE|CONSTRAINT/i);
+  });
+
+  test('the retained owner-scoped indexes are not dropped', () => {
+    for (const index of [
+      'live_trade_items_owner_sort_idx',
+      'live_trade_items_owner_group_idx',
+      'live_trade_items_instrument_idx',
+    ]) {
+      expect(sql).not.toContain(index);
+    }
+  });
+
+  test('the ordered migration set drops the index after creating it', () => {
+    const files = loadSqlFiles();
+    const createIndexAt = files.findIndex((f) =>
+      f.name.includes('2026-11-06-add-live-trade')
+    );
+    const dropIndexAt = files.findIndex((f) =>
+      f.name.includes('2026-11-09-live-trade-allow-repeat-instruments')
+    );
+    expect(createIndexAt).toBeGreaterThan(-1);
+    expect(dropIndexAt).toBeGreaterThan(createIndexAt);
+
+    const all = files.map((f) => stripCommentLines(f.sql)).join('\n');
+    const create = all.indexOf(
+      'CREATE UNIQUE INDEX IF NOT EXISTS live_trade_items_owner_instrument_uq'
+    );
+    const drop = all.indexOf(
+      'DROP INDEX IF EXISTS live_trade_items_owner_instrument_uq'
+    );
+    expect(create).toBeGreaterThan(-1);
+    expect(drop).toBeGreaterThan(create);
+    expect(all).toMatch(
+      /CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+live_trade_items[\s\S]*?item_id\s+UUID\s+PRIMARY\s+KEY/i
+    );
+  });
+});
+
 describe('db/migrate.js statement splitter (db/sql-statements.js)', () => {
   // Root cause of the production `relation "hourly_ingestion_checkpoints" does
   // not exist` failure: the old migrate.js split the whole file on ';' FIRST,
@@ -275,7 +333,7 @@ describe('db/migrate.js statement splitter (db/sql-statements.js)', () => {
   });
 
   test('every statement starts with a known SQL keyword', () => {
-    const starter = /^(CREATE|ALTER|INSERT|UPDATE|DELETE|SELECT|COMMENT|GRANT)\b/i;
+    const starter = /^(CREATE|ALTER|INSERT|UPDATE|DELETE|DROP|SELECT|COMMENT|GRANT)\b/i;
     for (const { name, sql } of files) {
       for (const stmt of splitStatements(sql)) {
         expect({ file: name, statement: stmt }).toEqual(

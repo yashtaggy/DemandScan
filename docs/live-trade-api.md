@@ -68,7 +68,7 @@ example validation issues or the current version on a conflict).
 | 401 | `UNAUTHENTICATED`, `TOKEN_EXPIRED` |
 | 403 | `FORBIDDEN` (Origin rejected) |
 | 404 | `NOT_FOUND` (valid but missing or foreign-owned identifier) |
-| 409 | `DUPLICATE_ITEM`, `DUPLICATE_GROUP`, `ITEM_LIMIT`, `GROUP_LIMIT`, `EDIT_CONFLICT`, `REORDER_STALE`, `WRITE_BUSY` |
+| 409 | `DUPLICATE_GROUP`, `ITEM_LIMIT`, `GROUP_LIMIT`, `EDIT_CONFLICT`, `REORDER_STALE`, `WRITE_BUSY` |
 | 413 | `PAYLOAD_TOO_LARGE` |
 | 422 | `INVALID_GROUP`, `INSTRUMENT_NOT_SYNCED`, `INSTRUMENT_INACTIVE` |
 | 429 | `QUOTE_COOLDOWN` (per-owner quote floor), `RATE_LIMITED` (provider throttling) |
@@ -279,8 +279,9 @@ ignored.
   missing instrument; the response never reveals another owner's data.
 - An empty selection returns `200` with `quotes: []` and performs **no**
   cooldown claim and **no** Kite request.
-- One bounded Kite batch call is made for at most 200 symbols (the board item
-  limit; Kite accepts up to 500). There is no per-instrument request.
+- One bounded Kite batch call is made for at most 200 unique symbols (the board
+  entry limit; Kite accepts up to 500). There is no per-instrument request.
+  Repeated trade entries for one instrument share a single symbol request.
 - The endpoint never returns the access token, session fields or raw provider
   payloads.
 
@@ -437,9 +438,9 @@ Query parameters:
 
 | Parameter | Rules |
 | --- | --- |
-| `instrumentIds` | Optional comma-separated positive integers, max 200, no duplicates, restricted to the owner's board. |
+| `instrumentIds` | Optional comma-separated positive integers, max 200, no duplicates, restricted to the owner's board. Repeated trade entries for one instrument share a single summary. |
 | `timeframe` | Optional scanner timeframe (`1H`, `4H`, `1D`, `1W`, `1M`, `3M`, `6M`, `1Y`) or `any`. Absent uses each item's saved timeframe. |
-| `includeExpanded` | `true`/`false` only. `true` requires exactly one selected instrument. |
+| `includeExpanded` | `true`/`false` only. `true` requires exactly one selected instrument; repeated entries for that instrument count as one selection. |
 | `includeSummaries` | `true`/`false` only, default `true`. `false` skips the nearest-zone and coverage reads and returns `summaries: []`; it is only useful together with `includeExpanded=true`, which needs neither. |
 | `limit` | 1–500, default 100. |
 | `offset` | 0–4999, default 0; `offset + limit ≤ 5000`. |
@@ -450,7 +451,7 @@ The response:
 {
   "success": true,
   "data": {
-    "summaries": [ /* one entry per selected instrument, same shape as the board */ ],
+    "summaries": [ /* one entry per selected instrument, same shape as the board; repeated trade entries share one summary */ ],
     "expanded": {
       "instrumentId": 408065,
       "symbol": "INFY",
@@ -594,8 +595,9 @@ Creates an item. Server-controlled values are rejected: owner, `itemId`,
 - Omitted `timeframe` means `"1D"`; explicit `null` means Any.
 - Omitted `priority`, `tradeStatus`, `direction`, prices, `notes` and `groupId`
   default to `MEDIUM`, `WATCHING`, `null`, `null`, `""` and `null`.
-- One item per owner per instrument (`DUPLICATE_ITEM`).
-- Item limit: 200 (`ITEM_LIMIT`).
+- The same instrument may be added repeatedly; every call creates a new
+  independent entry with its own `itemId`, version and plan fields.
+- Each trade entry counts separately toward the 200-entry limit (`ITEM_LIMIT`).
 - Unknown/non-NSE instrument: `422 INSTRUMENT_NOT_SYNCED`.
 - Inactive instrument: `422 INSTRUMENT_INACTIVE`.
 - Unknown/foreign group: `422 INVALID_GROUP`.

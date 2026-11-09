@@ -38,7 +38,13 @@ export function InstrumentSearch({
     enabled
   );
 
-  const onBoard = new Set(items.map((item) => item.instrumentId));
+  const entryCounts = new Map<number, number>();
+  for (const item of items) {
+    entryCounts.set(
+      item.instrumentId,
+      (entryCounts.get(item.instrumentId) ?? 0) + 1
+    );
+  }
   const trimmed = query.trim();
   const showEmpty =
     trimmed !== "" &&
@@ -73,11 +79,12 @@ export function InstrumentSearch({
             Add instruments
           </h2>
           <p className="mt-0.5 text-xs text-slate-500">
-            Search active NSE symbols or company names.
+            Search active NSE symbols or company names. Selecting a symbol again
+            adds a separate trade entry.
           </p>
         </div>
         <span className="text-xs text-slate-500">
-          {items.length} / 200 tracked
+          {items.length} / 200 trade entries
         </span>
       </div>
 
@@ -134,8 +141,8 @@ export function InstrumentSearch({
 
       {atLimit && (
         <p className="mt-2 rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-amber-400">
-          Your board has reached the 200-instrument limit. Remove an instrument
-          before adding another.
+          Your board has reached the 200 trade-entry limit. Remove a trade
+          entry before adding another.
         </p>
       )}
 
@@ -171,7 +178,8 @@ export function InstrumentSearch({
           aria-label="Instrument search results"
         >
           {results.map((instrument) => {
-            const alreadyAdded = onBoard.has(instrument.instrumentId);
+            const entryCount =
+              entryCounts.get(instrument.instrumentId) ?? 0;
             const adding = addingId === instrument.instrumentId;
             return (
               <li
@@ -184,26 +192,33 @@ export function InstrumentSearch({
                       {instrument.symbol}
                     </span>
                     <Badge variant="neutral">{instrument.exchange}</Badge>
+                    {entryCount > 0 && (
+                      <Badge variant="neutral">
+                        {entryCount === 1
+                          ? "1 entry on board"
+                          : `${entryCount} entries on board`}
+                      </Badge>
+                    )}
                   </div>
                   <p className="truncate text-[11px] text-slate-500">
                     {instrument.name ?? "Company name unavailable"}
                   </p>
                 </div>
-                {alreadyAdded ? (
-                  <Badge variant="success">On board</Badge>
-                ) : (
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="secondary"
-                    loading={adding}
-                    disabled={atLimit || addingId !== null}
-                    onClick={() => void handleAdd(instrument)}
-                    aria-label={`Add ${instrument.symbol} to watchlist`}
-                  >
-                    Add
-                  </Button>
-                )}
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  loading={adding}
+                  disabled={atLimit || addingId !== null}
+                  onClick={() => void handleAdd(instrument)}
+                  aria-label={
+                    entryCount > 0
+                      ? `Add another ${instrument.symbol} trade entry`
+                      : `Add ${instrument.symbol} to watchlist`
+                  }
+                >
+                  {entryCount > 0 ? "Add trade" : "Add"}
+                </Button>
               </li>
             );
           })}

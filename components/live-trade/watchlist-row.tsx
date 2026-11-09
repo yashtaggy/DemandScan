@@ -12,6 +12,7 @@ import {
   PRIORITY_META,
   STATUS_LABEL,
   directionLabel,
+  formatDateTimeIst,
   formatPrice,
 } from "@/lib/live-trade/ui";
 import { cn } from "@/lib/utils";
@@ -20,6 +21,11 @@ import { ZoneSummary } from "./zone-summary";
 
 interface WatchlistRowProps {
   item: LiveTradeItemDto;
+  /**
+   * 1-based position among this instrument's entries, or null when the
+   * instrument has a single entry and the number would only add noise.
+   */
+  entryNumber: number | null;
   groupName: string | null;
   summary: LiveTradeZoneSummaryDto | undefined;
   quote: LiveTradeQuoteDto | undefined;
@@ -93,6 +99,7 @@ function PlanValue({ label, value }: { label: string; value: number | null }) {
 
 function WatchlistRowComponent({
   item,
+  entryNumber,
   groupName,
   summary,
   quote,
@@ -113,12 +120,15 @@ function WatchlistRowComponent({
   onMoveDown,
 }: WatchlistRowProps) {
   const priority = PRIORITY_META[item.priority];
+  const entryLabel =
+    entryNumber === null ? item.symbol : `${item.symbol} entry ${entryNumber}`;
 
   return (
     <article
-      aria-label={`${item.symbol} watchlist item`}
+      aria-label={`${entryLabel} watchlist item`}
       aria-busy={busy}
-      data-testid={`watchlist-item-${item.symbol}`}
+      data-testid={`watchlist-item-${item.itemId}`}
+      data-symbol={item.symbol}
       className="rounded-xl border border-slate-700/50 bg-slate-800/30 transition-colors hover:border-slate-600/60"
     >
       <div className="flex flex-col gap-3 p-4">
@@ -128,6 +138,14 @@ function WatchlistRowComponent({
               <span className="font-mono text-sm font-bold text-slate-100">
                 {item.symbol}
               </span>
+              {entryNumber !== null && (
+                <span
+                  className="rounded border border-indigo-500/30 bg-indigo-500/10 px-1.5 py-0.5 font-mono text-[10px] font-medium text-indigo-300"
+                  title={`Entry ${entryNumber} for ${item.symbol}`}
+                >
+                  #{entryNumber}
+                </span>
+              )}
               <span
                 className={cn(
                   "rounded-full border px-1.5 py-0.5 text-[10px] font-medium",
@@ -161,6 +179,10 @@ function WatchlistRowComponent({
               {item.companyName ?? "Company name unavailable"}
             </p>
 
+            <p className="text-[10px] text-slate-600">
+              Added {formatDateTimeIst(item.createdAt)}
+            </p>
+
             <label className="flex items-center gap-1.5 text-[10px] text-slate-500">
               Group
               <select
@@ -169,7 +191,7 @@ function WatchlistRowComponent({
                 onChange={(event) =>
                   onMoveGroup(event.target.value === "" ? null : event.target.value)
                 }
-                aria-label={`Move ${item.symbol} to another group`}
+                aria-label={`Move ${entryLabel} to another group`}
                 className="rounded-md border border-slate-700/60 bg-slate-900/70 px-1.5 py-0.5 text-[10px] text-slate-300 focus:outline-none focus:ring-1 focus:ring-indigo-500/60 disabled:opacity-50"
               >
                 <option value="">Ungrouped</option>
@@ -187,7 +209,7 @@ function WatchlistRowComponent({
 
           <div className="flex flex-wrap items-center gap-1">
             <IconButton
-              label={`Move ${item.symbol} up`}
+              label={`Move ${entryLabel} up`}
               onClick={onMoveUp}
               disabled={busy || !canMoveUp}
             >
@@ -203,7 +225,7 @@ function WatchlistRowComponent({
               </svg>
             </IconButton>
             <IconButton
-              label={`Move ${item.symbol} down`}
+              label={`Move ${entryLabel} down`}
               onClick={onMoveDown}
               disabled={busy || !canMoveDown}
             >
@@ -233,7 +255,7 @@ function WatchlistRowComponent({
               Edit
             </button>
             <IconButton
-              label={`Remove ${item.symbol} from watchlist`}
+              label={`Remove ${entryLabel} from watchlist`}
               onClick={onDelete}
               tone="danger"
             >
@@ -321,6 +343,7 @@ function sameRowProps(
 ): boolean {
   return (
     previous.item === next.item &&
+    previous.entryNumber === next.entryNumber &&
     previous.groupName === next.groupName &&
     previous.summary === next.summary &&
     previous.quote === next.quote &&

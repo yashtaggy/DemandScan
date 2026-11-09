@@ -208,14 +208,21 @@ describe("POST /api/live-trade/items", () => {
     expect(body.data.priority).toBe("HIGH");
   });
 
-  it("rejects a duplicate instrument with 409", async () => {
+  it("creates a second independent entry for an instrument already on the board", async () => {
     mockFake.seedItem({ owner: "owner-a", instrumentId: 1 });
     const { status, body } = await call(
       createItemRoute,
       request("/api/live-trade/items", { method: "POST", body: itemBody() })
     );
-    expect(status).toBe(409);
-    expect(body.code).toBe("DUPLICATE_ITEM");
+    expect(status).toBe(201);
+    expect(body.success).toBe(true);
+    expect(body.data.instrumentId).toBe(1);
+    expect(body.data.symbol).toBe("INFY");
+    const ownerItems = mockFake.items.filter(
+      (item) => item.owner_user_id === "owner-a"
+    );
+    expect(ownerItems).toHaveLength(2);
+    expect(new Set(ownerItems.map((item) => item.item_id)).size).toBe(2);
   });
 
   it("rejects an unknown instrument with 422 INSTRUMENT_NOT_SYNCED", async () => {

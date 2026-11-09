@@ -53,9 +53,8 @@ const DEFAULT_MESSAGES: Record<string, string> = {
   NOT_FOUND: "That record no longer exists.",
   INVALID_BODY: "Check the highlighted fields and try again.",
   INVALID_QUERY: "The request was not valid.",
-  DUPLICATE_ITEM: "That stock is already on your board.",
   DUPLICATE_GROUP: "A group with that name already exists.",
-  ITEM_LIMIT: "Your board already has the maximum of 200 instruments.",
+  ITEM_LIMIT: "Your board already has the maximum of 200 trade entries.",
   GROUP_LIMIT: "You already have the maximum of 20 groups.",
   EDIT_CONFLICT:
     "This item changed in another request. Review the latest version and save again.",

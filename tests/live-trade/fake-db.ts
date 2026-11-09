@@ -949,11 +949,6 @@ export class FakeLiveTradeDb {
               ),
             item_count: items.filter((item) => item.owner_user_id === owner)
               .length,
-            instrument_owned: items.some(
-              (item) =>
-                item.owner_user_id === owner &&
-                item.instrument_id === Number(instrumentId)
-            ),
           },
         ];
       }
@@ -1001,9 +996,6 @@ export class FakeLiveTradeDb {
         }
         const owned = items.filter((item) => item.owner_user_id === owner);
         if (owned.length >= 200) return [];
-        if (owned.some((item) => item.instrument_id === Number(instrumentId))) {
-          return [];
-        }
         const sortOrder =
           owned.length === 0
             ? 0

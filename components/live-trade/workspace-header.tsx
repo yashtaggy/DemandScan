@@ -20,7 +20,7 @@ export interface QuoteSummaryView {
 }
 
 interface WorkspaceHeaderProps {
-  instrumentCount: number;
+  entryCount: number;
   groupCount: number;
   market: MarketStatusView | null;
   fetchedAt: string | null;
@@ -34,7 +34,7 @@ interface WorkspaceHeaderProps {
 }
 
 export function WorkspaceHeader({
-  instrumentCount,
+  entryCount,
   groupCount,
   market,
   fetchedAt,
@@ -90,7 +90,7 @@ export function WorkspaceHeader({
           </p>
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
             <Badge variant="neutral">
-              {formatCount(instrumentCount)} tracked instruments
+              {formatCount(entryCount)} tracked trade {entryCount === 1 ? "entry" : "entries"}
             </Badge>
             <Badge variant="neutral">
               {formatCount(groupCount)} {groupCount === 1 ? "group" : "groups"}
@@ -103,7 +103,7 @@ export function WorkspaceHeader({
           variant="secondary"
           size="sm"
           onClick={onRefreshQuotes}
-          disabled={refreshDisabled || instrumentCount === 0}
+          disabled={refreshDisabled || entryCount === 0}
           loading={quotesRefreshing || quotesLoading}
           id="refresh-quotes-btn"
         >

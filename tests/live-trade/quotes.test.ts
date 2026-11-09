@@ -369,6 +369,30 @@ describe("quote service", () => {
     expect(result.quotes.map((row) => row.symbol)).toEqual(["INFY", "TCS"]);
   });
 
+  it("requests repeated entries for one instrument only once", async () => {
+    mockFake.seedItem({ owner: "owner-a", instrumentId: 1 });
+    const provider = providerReturning({
+      "NSE:INFY": quoteData(),
+      "NSE:TCS": quoteData(),
+    });
+
+    const result = await getLiveQuotesAt(
+      NOW_OPEN,
+      OWNER_A,
+      SESSION,
+      undefined,
+      provider
+    );
+
+    expect(provider.fetchQuotes).toHaveBeenCalledTimes(1);
+    expect(provider.fetchQuotes).toHaveBeenCalledWith(
+      "server-side-access-token",
+      ["NSE:INFY", "NSE:TCS"]
+    );
+    expect(result.quotes.map((row) => row.instrumentId)).toEqual([1, 2]);
+    expect(result.requestedInstruments).toBe(2);
+  });
+
   it("honours a requested subset and its order", async () => {
     const provider = providerReturning({
       "NSE:INFY": quoteData(),

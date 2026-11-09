@@ -41,7 +41,6 @@ const LIVE_TRADE_INDEXES = {
     'live_trade_groups_owner_sort_idx',
   ],
   live_trade_items: [
-    'live_trade_items_owner_instrument_uq',
     'live_trade_items_owner_sort_idx',
     'live_trade_items_owner_group_idx',
     'live_trade_items_instrument_idx',
